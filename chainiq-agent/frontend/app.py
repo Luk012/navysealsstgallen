@@ -218,6 +218,26 @@ def _progress_from_event(event):
     }.get(event.get("stage"), 15)
 
 
+def _max_progress_from_events(events, default=0):
+    max_progress = default
+    for event in events:
+        if event.get("event_type") == "heartbeat":
+            continue
+        event_progress = _progress_from_event(event)
+        if event_progress > max_progress:
+            max_progress = event_progress
+    return max_progress
+
+
+def _load_live_events(request_id, live_events_store):
+    """Prefer the backend event log, but keep the longer local cache as fallback."""
+    cached_events = live_events_store.get(request_id) or []
+    backend_events = fetch_events(request_id)
+    events = backend_events if len(backend_events) >= len(cached_events) else cached_events
+    live_events_store[request_id] = events
+    return events
+
+
 def _payload_for_display(event):
     payload = event.get("payload")
     if not payload:
@@ -262,8 +282,19 @@ def _render_live_reasoning(log_placeholder, events):
     log_placeholder.code(rendered, language="text")
 
 
-def _update_live_status(status_placeholder, progress_placeholder, event):
-    progress_placeholder.progress(_progress_from_event(event))
+def _update_live_status(status_placeholder, progress_placeholder, event, progress_state):
+    """Update the live status and progress bar.
+
+    progress_state is a dict with key "max" tracking the highest progress seen,
+    so the bar never goes backwards (e.g. on heartbeats).
+    """
+    # Skip heartbeats for progress — they carry the job-level status which
+    # would reset the bar to 10 every 5 seconds.
+    if event.get("event_type") != "heartbeat":
+        new_progress = _progress_from_event(event)
+        if new_progress > progress_state.get("max", 0):
+            progress_state["max"] = new_progress
+    progress_placeholder.progress(progress_state.get("max", 5))
 
     status = event.get("status")
     message = event.get("message", "Processing")
@@ -273,28 +304,30 @@ def _update_live_status(status_placeholder, progress_placeholder, event):
     elif status == "completed":
         status_placeholder.success(message)
     elif event.get("event_type") == "heartbeat":
-        status_placeholder.info("Processing is still running")
+        status_placeholder.info("Processing is still running...")
     else:
         status_placeholder.info(message)
 
 
-def _stream_processing(request_id, status_placeholder, progress_placeholder, log_placeholder):
-    start_state = start_processing(request_id)
-    if start_state.get("status") == "failed":
-        return {
-            "status": "failed",
-            "error": start_state.get("error", "Failed to start processing."),
-            "events": [],
-            "result": None,
-        }
+def _stream_processing(request_id, status_placeholder, progress_placeholder, log_placeholder, start_if_needed=True):
+    if start_if_needed:
+        start_state = start_processing(request_id)
+        if start_state.get("status") == "failed":
+            return {
+                "status": "failed",
+                "error": start_state.get("error", "Failed to start processing."),
+                "events": [],
+                "result": None,
+            }
 
     if create_connection is None:
-        return {
-            "status": "failed",
-            "error": "websocket-client is not installed. Reinstall requirements and restart Streamlit.",
-            "events": [],
-            "result": None,
-        }
+        return _poll_processing(
+            request_id,
+            status_placeholder,
+            progress_placeholder,
+            log_placeholder,
+            Exception("websocket-client not installed"),
+        )
 
     events = []
     final_result = None
@@ -302,6 +335,10 @@ def _stream_processing(request_id, status_placeholder, progress_placeholder, log
     final_status = None
     ws = None
     ws_error = None
+    progress_state = {"max": 5}
+
+    status_placeholder.info("Connecting to live reasoning stream...")
+    progress_placeholder.progress(5)
 
     for candidate in _ws_candidates(request_id):
         try:
@@ -330,7 +367,7 @@ def _stream_processing(request_id, status_placeholder, progress_placeholder, log
             if event.get("event_type") != "heartbeat":
                 events.append(event)
 
-            _update_live_status(status_placeholder, progress_placeholder, event)
+            _update_live_status(status_placeholder, progress_placeholder, event, progress_state)
             _render_live_reasoning(log_placeholder, events)
 
             if event.get("event_type") == "final_result":
@@ -342,16 +379,30 @@ def _stream_processing(request_id, status_placeholder, progress_placeholder, log
                     final_error = (event.get("payload") or {}).get("error") or event.get("message")
                 break
     except Exception as e:
-        final_status = "failed"
-        final_error = str(e)
+        return _poll_processing(
+            request_id,
+            status_placeholder,
+            progress_placeholder,
+            log_placeholder,
+            e,
+        )
     finally:
         try:
             ws.close()
         except Exception:
             pass
 
+    if final_status is None:
+        return _poll_processing(
+            request_id,
+            status_placeholder,
+            progress_placeholder,
+            log_placeholder,
+            Exception("Live stream closed before completion status was received"),
+        )
+
     return {
-        "status": final_status or "failed",
+        "status": final_status,
         "error": final_error,
         "events": events,
         "result": final_result,
@@ -359,12 +410,10 @@ def _stream_processing(request_id, status_placeholder, progress_placeholder, log
 
 
 def _poll_processing(request_id, status_placeholder, progress_placeholder, log_placeholder, ws_error=None):
-    events = []
-
     if isinstance(ws_error, WebSocketBadStatusException):
-        note = "WebSocket endpoint is unavailable on the running backend. Restart the backend to enable live reasoning; using status polling for now."
+        note = "WebSocket unavailable — using status polling."
     elif ws_error is not None:
-        note = f"WebSocket connection failed ({ws_error}). Using status polling for now."
+        note = f"WebSocket failed ({ws_error}) — using status polling."
     else:
         note = "Using status polling."
 
@@ -372,43 +421,64 @@ def _poll_processing(request_id, status_placeholder, progress_placeholder, log_p
     progress_placeholder.progress(10)
     log_placeholder.code(note, language="text")
 
-    for _ in range(120):
+    progress_max = 10
+    polled_events = []
+
+    for _ in range(180):
         result = get_result(request_id)
+
+        # Also poll events to update the live reasoning log
+        polled_events = fetch_events(request_id)
+        if polled_events:
+            _render_live_reasoning(log_placeholder, polled_events)
+            progress_max = _max_progress_from_events(polled_events, default=progress_max)
+            progress_placeholder.progress(progress_max)
+
         if _is_job_status_payload(result):
             status = result.get("status")
-            progress_placeholder.progress(15 if status == "queued" else 60 if status == "processing" else 100)
             if status == "failed":
                 return {
                     "status": "failed",
                     "error": result.get("error", "Processing failed"),
-                    "events": events,
+                    "events": polled_events,
                     "result": None,
                 }
             if status == "completed":
-                break
+                # Fetch final result
+                final = get_result(request_id)
+                final_events = fetch_events(request_id)
+                progress_placeholder.progress(100)
+                return {
+                    "status": "completed",
+                    "error": None,
+                    "events": final_events,
+                    "result": final if not _is_job_status_payload(final) else None,
+                }
             time.sleep(2)
             continue
 
         return {
             "status": "completed",
             "error": None,
-            "events": events,
+            "events": polled_events,
             "result": result,
         }
 
+    # Timeout — check one last time
     latest = get_result(request_id)
+    latest_events = fetch_events(request_id)
     if _is_job_status_payload(latest):
         return {
             "status": latest.get("status", "failed"),
             "error": latest.get("error", "Processing did not finish in time."),
-            "events": events,
+            "events": latest_events,
             "result": None,
         }
 
     return {
         "status": "completed",
         "error": None,
-        "events": events,
+        "events": latest_events,
         "result": latest,
     }
 
@@ -570,28 +640,34 @@ def _render_main_area(selected_id, requests_list, total):
     result_status = result_state.get("status") if _is_job_status_payload(result_state) else None
     is_processing = result_status in {"queued", "processing"}
     has_result = not _is_job_status_payload(result_state)
-    is_actively_streaming = st.session_state.get(f"streaming_{selected_id}", False)
+    live_action = st.session_state.get("live_action")
+    action_mode = None
+    if isinstance(live_action, dict) and live_action.get("request_id") == selected_id:
+        action_mode = live_action.get("mode")
+    is_live_action_running = action_mode in {"process", "watch", "replay"}
 
-    # Load cached events from backend if not already in session state
-    stored_events = live_events_store.get(selected_id, [])
-    if not stored_events and (has_result or is_processing):
-        stored_events = fetch_events(selected_id)
-        if stored_events:
-            live_events_store[selected_id] = stored_events
+    # Refresh the event log on every render so replay/progress stay in sync.
+    stored_events = _load_live_events(selected_id, live_events_store)
+    has_events = bool(stored_events)
 
     col_btn, col_watch, col_status = st.columns([1, 1, 2])
     with col_btn:
         process_btn = st.button(
-            "Processing..." if is_actively_streaming else "Process Request",
+            "Processing..." if action_mode == "process" else "Process Request",
             type="primary",
             use_container_width=True,
-            disabled=is_processing or has_result or is_actively_streaming,
+            disabled=is_processing or has_result or is_live_action_running,
         )
     with col_watch:
+        watch_label = "Replay Reasoning" if (has_result and has_events) else "Watch Live"
+        if action_mode == "watch":
+            watch_label = "Watching..."
+        elif action_mode == "replay":
+            watch_label = "Replaying..."
         watch_btn = st.button(
-            "Watch Live",
+            watch_label,
             use_container_width=True,
-            disabled=not is_processing,
+            disabled=(not is_processing and not has_events) or is_live_action_running,
         )
     with col_status:
         live_status = st.empty()
@@ -599,43 +675,86 @@ def _render_main_area(selected_id, requests_list, total):
     st.markdown("### Live Reasoning")
     live_progress = st.empty()
     live_log = st.empty()
-    _render_live_reasoning(live_log, stored_events)
+
+    if process_btn:
+        st.session_state["live_action"] = {"request_id": selected_id, "mode": "process"}
+        st.rerun()
+
+    if watch_btn:
+        st.session_state["live_action"] = {
+            "request_id": selected_id,
+            "mode": "watch" if is_processing else "replay",
+        }
+        st.rerun()
 
     cached = None
-    if process_btn or watch_btn:
-        # Mark as actively streaming to disable buttons on rerun
-        st.session_state[f"streaming_{selected_id}"] = True
-        stream_state = _stream_processing(selected_id, live_status, live_progress, live_log)
-        st.session_state[f"streaming_{selected_id}"] = False
-
-        # Cache the events (merge with any replayed events)
-        new_events = stream_state.get("events", [])
-        if new_events:
-            live_events_store[selected_id] = new_events
-
-        if stream_state.get("status") == "failed":
-            live_status.error(stream_state.get("error", "Processing failed"))
-        else:
-            cached = stream_state.get("result")
-            if cached is None:
-                fallback = get_result(selected_id)
-                if not _is_job_status_payload(fallback):
-                    cached = fallback
-    else:
-        if _is_job_status_payload(result_state):
-            if result_status in {"queued", "processing"}:
-                live_status.info("Processing in background. Click **Watch Live** to follow the reasoning.")
-                live_progress.progress(10 if result_status == "processing" else 5)
-            elif result_status == "failed":
-                live_status.error(f"Processing failed: {result_state.get('error', 'Unknown error')}")
+    try:
+        if action_mode in {"process", "watch"}:
+            stream_state = _stream_processing(
+                selected_id,
+                live_status,
+                live_progress,
+                live_log,
+                start_if_needed=(action_mode == "process"),
+            )
+            new_events = stream_state.get("events", [])
+            if new_events:
+                live_events_store[selected_id] = new_events
+            if stream_state.get("status") == "failed":
+                live_status.error(stream_state.get("error", "Processing failed"))
             else:
-                live_status.caption("No cached result yet.")
+                cached = stream_state.get("result")
+                if cached is None:
+                    fallback = get_result(selected_id)
+                    if not _is_job_status_payload(fallback):
+                        cached = fallback
+        elif action_mode == "replay" and has_events:
+            # Completed request: replay cached events with animated progress
+            live_status.info("Replaying reasoning from cached events...")
+            progress_state = {"max": 0}
+            for i, event in enumerate(stored_events):
+                if event.get("event_type") == "heartbeat":
+                    continue
+                new_progress = _progress_from_event(event)
+                if new_progress > progress_state["max"]:
+                    progress_state["max"] = new_progress
+                    live_progress.progress(progress_state["max"])
+                _render_live_reasoning(live_log, stored_events[: i + 1])
+                time.sleep(0.15)
+            live_progress.progress(100)
+            live_status.success("Replay complete.")
+            if has_result:
+                cached = result_state
         else:
-            live_status.success("Cached result loaded.")
-            cached = result_state
-            # Show progress as complete for cached results
-            if stored_events:
+            # No button clicked — show static state
+            if _is_job_status_payload(result_state):
+                if is_processing:
+                    live_status.info("Processing in background. Click **Watch Live** to follow the reasoning.")
+                    live_progress.progress(
+                        _max_progress_from_events(
+                            stored_events,
+                            default=10 if result_status == "processing" else 5,
+                        )
+                    )
+                elif result_status == "failed":
+                    live_status.error(f"Processing failed: {result_state.get('error', 'Unknown error')}")
+                    progress = _max_progress_from_events(stored_events)
+                    if progress:
+                        live_progress.progress(progress)
+                else:
+                    live_status.caption("Click **Process Request** to start analysis.")
+            else:
+                live_status.success("Cached result loaded.")
+                cached = result_state
                 live_progress.progress(100)
+
+            # Always show cached events if available (viewable from request history)
+            _render_live_reasoning(live_log, stored_events)
+    finally:
+        if action_mode:
+            current_action = st.session_state.get("live_action")
+            if isinstance(current_action, dict) and current_action.get("request_id") == selected_id:
+                st.session_state.pop("live_action", None)
 
     if not cached:
         return
