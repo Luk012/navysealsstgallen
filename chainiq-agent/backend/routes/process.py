@@ -129,6 +129,18 @@ async def get_result(request_id: str):
     return _results_cache[request_id]
 
 
+@router.get("/events/{request_id}")
+async def get_events(request_id: str):
+    """Get cached processing events for a request (for live reasoning replay)."""
+    events = _job_events.get(request_id, [])
+    status = _job_status.get(request_id, {}).get("status", "not_started")
+    return {
+        "request_id": request_id,
+        "status": status,
+        "events": events,
+    }
+
+
 async def _ensure_processing_started(request_id: str, request: dict) -> dict:
     """Start a job once and return its current status payload."""
     if request_id in _results_cache:

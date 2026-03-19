@@ -171,6 +171,31 @@ def _ws_candidates(request_id):
     return candidates
 
 
+def fetch_events(request_id):
+    """Fetch cached processing events from the backend."""
+    try:
+        r = httpx.get(f"{API_BASE}/events/{request_id}", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return data.get("events", [])
+    except Exception:
+        return []
+
+
+def _format_price(value, currency=""):
+    """Format a price with precision matching pricing.csv.
+
+    Small values (< 1.0) get 4 decimal places; others get 2.
+    """
+    if not isinstance(value, (int, float)):
+        return f"{currency} {value}" if currency else str(value)
+    if abs(value) < 1.0 and value != 0:
+        formatted = f"{value:,.4f}"
+    else:
+        formatted = f"{value:,.2f}"
+    return f"{currency} {formatted}".strip()
+
+
 def _progress_from_event(event):
     status = event.get("status")
     if status == "queued":
@@ -184,10 +209,11 @@ def _progress_from_event(event):
         "stage1": 20,
         "stage2": 40,
         "stage3": 55,
-        "stage4": 75,
-        "branch_b": 85,
-        "branch_a": 90,
-        "near_miss": 92,
+        "stage4": 65,
+        "verification": 75,
+        "branch_b": 82,
+        "branch_a": 85,
+        "near_miss": 90,
         "pipeline": 95,
     }.get(event.get("stage"), 15)
 
@@ -540,18 +566,26 @@ def _render_main_area(selected_id, requests_list, total):
         st.markdown(f"> {req_detail.get('request_text', 'N/A')}")
 
     live_events_store = st.session_state.setdefault("live_events", {})
-    stored_events = live_events_store.get(selected_id, [])
     result_state = get_result(selected_id)
     result_status = result_state.get("status") if _is_job_status_payload(result_state) else None
     is_processing = result_status in {"queued", "processing"}
+    has_result = not _is_job_status_payload(result_state)
+    is_actively_streaming = st.session_state.get(f"streaming_{selected_id}", False)
+
+    # Load cached events from backend if not already in session state
+    stored_events = live_events_store.get(selected_id, [])
+    if not stored_events and (has_result or is_processing):
+        stored_events = fetch_events(selected_id)
+        if stored_events:
+            live_events_store[selected_id] = stored_events
 
     col_btn, col_watch, col_status = st.columns([1, 1, 2])
     with col_btn:
         process_btn = st.button(
-            "Process Request",
+            "Processing..." if is_actively_streaming else "Process Request",
             type="primary",
             use_container_width=True,
-            disabled=is_processing,
+            disabled=is_processing or has_result or is_actively_streaming,
         )
     with col_watch:
         watch_btn = st.button(
@@ -569,8 +603,15 @@ def _render_main_area(selected_id, requests_list, total):
 
     cached = None
     if process_btn or watch_btn:
+        # Mark as actively streaming to disable buttons on rerun
+        st.session_state[f"streaming_{selected_id}"] = True
         stream_state = _stream_processing(selected_id, live_status, live_progress, live_log)
-        live_events_store[selected_id] = stream_state.get("events", [])
+        st.session_state[f"streaming_{selected_id}"] = False
+
+        # Cache the events (merge with any replayed events)
+        new_events = stream_state.get("events", [])
+        if new_events:
+            live_events_store[selected_id] = new_events
 
         if stream_state.get("status") == "failed":
             live_status.error(stream_state.get("error", "Processing failed"))
@@ -583,7 +624,7 @@ def _render_main_area(selected_id, requests_list, total):
     else:
         if _is_job_status_payload(result_state):
             if result_status in {"queued", "processing"}:
-                live_status.info("Processing in background. Click `Watch Live` to follow the reasoning.")
+                live_status.info("Processing in background. Click **Watch Live** to follow the reasoning.")
                 live_progress.progress(10 if result_status == "processing" else 5)
             elif result_status == "failed":
                 live_status.error(f"Processing failed: {result_state.get('error', 'Unknown error')}")
@@ -592,11 +633,12 @@ def _render_main_area(selected_id, requests_list, total):
         else:
             live_status.success("Cached result loaded.")
             cached = result_state
+            # Show progress as complete for cached results
+            if stored_events:
+                live_progress.progress(100)
 
     if not cached:
         return
-
-    _render_results(cached) if callable(globals().get("_render_results")) else None
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "Interpretation", "Suppliers", "Escalations", "Audit Trail",
@@ -819,9 +861,9 @@ def _render_suppliers(result, request_id=None):
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Total Price", f"{s.get('currency', '')} {s.get('total_price', 0):,.2f}")
+            st.metric("Total Price", _format_price(s.get("total_price", 0), s.get("currency", "")))
         with col2:
-            st.metric("Unit Price", f"{s.get('currency', '')} {s.get('unit_price', 0):,.2f}")
+            st.metric("Unit Price", _format_price(s.get("unit_price", 0), s.get("currency", "")))
         with col3:
             st.metric("Lead Time", f"{s.get('standard_lead_time_days', 'N/A')}d std / {s.get('expedited_lead_time_days', 'N/A')}d exp")
         with col4:
@@ -839,7 +881,7 @@ def _render_suppliers(result, request_id=None):
                 rank = s.get("rank", 0)
                 st.markdown(
                     f"**#{rank} {s.get('supplier_name', '')}** — "
-                    f"{s.get('currency', '')} {s.get('total_price', 0):,.2f} | "
+                    f"{_format_price(s.get('total_price', 0), s.get('currency', ''))} | "
                     f"Quality {s.get('quality_score', 'N/A')} | "
                     f"Lead {s.get('standard_lead_time_days', 'N/A')}d"
                 )
@@ -973,10 +1015,20 @@ def _render_escalations(result, request_id=None):
         if request_id:
             if st.button("Re-evaluate All Outputs", type="primary", use_container_width=True, key="reevaluate_btn"):
                 try:
-                    with st.spinner("Re-evaluating..."):
-                        r = httpx.post(f"{API_BASE}/escalation/{request_id}/reevaluate", timeout=60)
+                    with st.spinner("Re-evaluating all output tabs... This may take up to 3 minutes."):
+                        r = httpx.post(f"{API_BASE}/escalation/{request_id}/reevaluate", timeout=180)
                         r.raise_for_status()
                     st.rerun()
+                except httpx.TimeoutException:
+                    # Check if re-evaluation completed despite timeout
+                    latest = get_result(request_id)
+                    if not _is_job_status_payload(latest) and latest.get("reevaluated"):
+                        st.rerun()
+                    else:
+                        st.error(
+                            "Re-evaluation is taking longer than expected. "
+                            "Please refresh the page in a moment to check results."
+                        )
                 except Exception as e:
                     st.error(f"Re-evaluation failed: {e}")
         return
