@@ -61,6 +61,9 @@ async def run_stage1(request: dict, emit=None) -> PRS:
                     source="extracted",
                 ))
 
+    # Normalize category values against actual categories.csv entries
+    _normalize_categories(prs)
+
     # Enrich with structured fields from the request that may be more reliable
     _enrich_from_structured(prs, request)
 
@@ -115,7 +118,8 @@ def _enrich_from_structured(prs: PRS, request: dict):
     }
 
     for field_name, struct_value in structured_overrides.items():
-        if struct_value is None:
+        if struct_value is None or struct_value == "":
+            # Skip empty/missing structured fields — keep LLM extraction
             continue
         field = getattr(prs, field_name)
         if isinstance(field, PRSField):
@@ -183,3 +187,75 @@ def _enrich_from_structured(prs: PRS, request: dict):
             )
         except (ValueError, TypeError):
             pass
+
+
+def _normalize_categories(prs: PRS):
+    """Normalize LLM-extracted category values against actual categories.csv entries.
+
+    LLMs sometimes return category_l2 as 'IT > Cloud Compute' instead of
+    'Cloud Compute', or use slight variations. This function matches them
+    against the real category taxonomy.
+    """
+    valid_categories = {
+        (row["category_l1"], row["category_l2"])
+        for _, row in data_store.categories_df.iterrows()
+    }
+    valid_l1s = {c[0] for c in valid_categories}
+    valid_l2s = {c[1] for c in valid_categories}
+
+    cat_l1 = prs.category_l1.value or ""
+    cat_l2 = prs.category_l2.value or ""
+
+    # Fix common LLM pattern: "IT > Cloud Compute" → "Cloud Compute"
+    if " > " in cat_l2:
+        parts = cat_l2.split(" > ", 1)
+        stripped_l2 = parts[-1].strip()
+        # If the prefix matches L1 and stripped value is a valid L2, use it
+        if stripped_l2 in valid_l2s:
+            cat_l2 = stripped_l2
+            prs.category_l2 = PRSField(
+                value=cat_l2,
+                confidence=prs.category_l2.confidence,
+                evidence=prs.category_l2.evidence,
+                source=prs.category_l2.source,
+            )
+
+    # If exact match exists, we're done
+    if (cat_l1, cat_l2) in valid_categories:
+        return
+
+    # Try case-insensitive match
+    for vl1, vl2 in valid_categories:
+        if vl1.lower() == cat_l1.lower() and vl2.lower() == cat_l2.lower():
+            prs.category_l1 = PRSField(
+                value=vl1,
+                confidence=prs.category_l1.confidence,
+                evidence=prs.category_l1.evidence,
+                source=prs.category_l1.source,
+            )
+            prs.category_l2 = PRSField(
+                value=vl2,
+                confidence=prs.category_l2.confidence,
+                evidence=prs.category_l2.evidence,
+                source=prs.category_l2.source,
+            )
+            return
+
+    # Try fuzzy match: find L2 that contains the extracted value or vice versa
+    for vl1, vl2 in valid_categories:
+        if vl1.lower() == cat_l1.lower() and (
+            vl2.lower() in cat_l2.lower() or cat_l2.lower() in vl2.lower()
+        ):
+            prs.category_l1 = PRSField(
+                value=vl1,
+                confidence=prs.category_l1.confidence,
+                evidence=f"Normalized from '{prs.category_l2.value}' to '{vl2}'",
+                source=prs.category_l1.source,
+            )
+            prs.category_l2 = PRSField(
+                value=vl2,
+                confidence=prs.category_l2.confidence,
+                evidence=f"Normalized from '{prs.category_l2.value}' to '{vl2}'",
+                source=prs.category_l2.source,
+            )
+            return

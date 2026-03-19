@@ -23,9 +23,17 @@ async def run_stage2(prs: PRS) -> dict:
     budget = coerce_number(prs.budget_amount.value)
     delivery_countries = prs.delivery_countries.value or []
 
+    # If delivery_countries is empty, derive fallback from currency for pricing
+    effective_delivery_countries = delivery_countries
+    if not effective_delivery_countries:
+        from backend.config import COUNTRY_TO_CURRENCY
+        fallback = [c for c, cur in COUNTRY_TO_CURRENCY.items() if cur == currency]
+        if fallback:
+            effective_delivery_countries = fallback[:1]
+
     # Pre-compute pricing context (LLM should NOT do math)
     pricing_context = _build_pricing_context(
-        cat_l1, cat_l2, delivery_countries, currency, quantity
+        cat_l1, cat_l2, effective_delivery_countries, currency, quantity
     )
 
     # Pre-compute supplier context
@@ -33,9 +41,9 @@ async def run_stage2(prs: PRS) -> dict:
     supplier_context = []
     for s in candidates:
         sid = s["supplier_id"]
-        is_pref, _ = is_preferred_supplier(sid, cat_l1, cat_l2, delivery_countries)
+        is_pref, _ = is_preferred_supplier(sid, cat_l1, cat_l2, effective_delivery_countries)
         is_restricted, restriction_reason = check_supplier_restriction(
-            sid, cat_l1, cat_l2, delivery_countries,
+            sid, cat_l1, cat_l2, effective_delivery_countries,
             coerce_number(pricing_context.get("min_total_cost"), default=0) or 0, currency
         )
         supplier_context.append({
@@ -49,7 +57,7 @@ async def run_stage2(prs: PRS) -> dict:
             "esg_score": s.get("esg_score"),
             "capacity_per_month": s.get("capacity_per_month"),
             "data_residency_supported": s.get("data_residency_supported"),
-            "covers_delivery": all(c in s.get("service_regions_list", []) for c in delivery_countries),
+            "covers_delivery": all(c in s.get("service_regions_list", []) for c in effective_delivery_countries),
         })
 
     # Build PRS dict for LLM

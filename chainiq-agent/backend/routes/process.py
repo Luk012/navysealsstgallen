@@ -389,10 +389,28 @@ def _build_output(
         "issues_detected": prs.issues if prs.issues else [],
     }
 
-    # Add issues from analysis anomalies
+    # Add issues from analysis anomalies, filtering out stale ones
     if analysis.get("anomalies"):
         issue_counter = len(validation["issues_detected"]) + 1
         for anomaly in analysis["anomalies"]:
+            desc = anomaly.get("description", "").lower()
+            # Skip anomalies that claim fields are empty when they are actually populated
+            skip = False
+            if "empty" in desc or "not populated" in desc or "not specified" in desc:
+                # Check if the field referenced is actually populated in the PRS
+                field_checks = {
+                    "category_l1": prs.category_l1.value,
+                    "category_l2": prs.category_l2.value,
+                    "currency": prs.currency.value,
+                    "budget_amount": prs.budget_amount.value,
+                    "quantity": prs.quantity.value,
+                }
+                for field_name, field_val in field_checks.items():
+                    if field_name in desc and field_val:
+                        skip = True
+                        break
+            if skip:
+                continue
             validation["issues_detected"].append({
                 "issue_id": f"V-{issue_counter:03d}",
                 "severity": anomaly.get("severity", "medium"),

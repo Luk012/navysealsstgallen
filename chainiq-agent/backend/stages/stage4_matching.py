@@ -43,6 +43,21 @@ def run_stage4(prs: PRS) -> list[SupplierConstraintResult]:
     candidates = get_candidate_suppliers(cat_l1, cat_l2)
     results = []
 
+    # If delivery_countries is empty, use supplier's HQ country or default
+    # region to allow pricing lookup. This prevents all suppliers from
+    # failing with CURRENCY_MISMATCH when no delivery country is specified.
+    effective_delivery_countries = delivery_countries
+    if not effective_delivery_countries:
+        # Derive a fallback from currency → typical region
+        from backend.config import COUNTRY_TO_CURRENCY
+        fallback_countries = [
+            country for country, curr in COUNTRY_TO_CURRENCY.items()
+            if curr == currency
+        ]
+        if fallback_countries:
+            # Pick the first matching country as a fallback for pricing lookup
+            effective_delivery_countries = fallback_countries[:1]
+
     for supplier in candidates:
         sid = supplier["supplier_id"]
         sname = supplier["supplier_name"]
@@ -51,22 +66,28 @@ def run_stage4(prs: PRS) -> list[SupplierConstraintResult]:
         details = []
 
         # 1. Check if supplier covers delivery countries
-        covers = supplier_covers_countries(supplier, delivery_countries)
-        result.covers_delivery_country = covers
-        if not covers:
-            bitmask |= ConstraintFlag.NO_REGION_COVER
-            details.append({"constraint": "NO_REGION_COVER", "status": "fail",
-                            "reason": f"Service regions {supplier.get('service_regions_list', [])} do not cover {delivery_countries}"})
+        # If no delivery countries specified, skip this check (vacuously true)
+        if delivery_countries:
+            covers = supplier_covers_countries(supplier, delivery_countries)
+            result.covers_delivery_country = covers
+            if not covers:
+                bitmask |= ConstraintFlag.NO_REGION_COVER
+                details.append({"constraint": "NO_REGION_COVER", "status": "fail",
+                                "reason": f"Service regions {supplier.get('service_regions_list', [])} do not cover {delivery_countries}"})
+            else:
+                details.append({"constraint": "NO_REGION_COVER", "status": "pass"})
         else:
-            details.append({"constraint": "NO_REGION_COVER", "status": "pass"})
+            result.covers_delivery_country = True
+            details.append({"constraint": "NO_REGION_COVER", "status": "pass",
+                            "reason": "No delivery countries specified — region check skipped"})
 
         # 2. Check restricted status
         pricing = get_best_pricing_for_supplier(
-            sid, cat_l1, cat_l2, delivery_countries, currency, quantity
+            sid, cat_l1, cat_l2, effective_delivery_countries, currency, quantity
         )
         estimated_value = pricing["total_price"] if pricing else 0
         is_restricted, restriction_reason = check_supplier_restriction(
-            sid, cat_l1, cat_l2, delivery_countries, estimated_value, currency
+            sid, cat_l1, cat_l2, effective_delivery_countries, estimated_value, currency
         )
         if is_restricted:
             bitmask |= ConstraintFlag.RESTRICTED
@@ -106,7 +127,7 @@ def run_stage4(prs: PRS) -> list[SupplierConstraintResult]:
                 details.append({"constraint": "LEAD_TIME_MISS", "status": "pass"})
 
         # 6. Preferred status
-        is_pref, _ = is_preferred_supplier(sid, cat_l1, cat_l2, delivery_countries)
+        is_pref, _ = is_preferred_supplier(sid, cat_l1, cat_l2, effective_delivery_countries)
         result.preferred = is_pref
         if not is_pref:
             bitmask |= ConstraintFlag.NOT_PREFERRED
