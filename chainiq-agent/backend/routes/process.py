@@ -519,7 +519,7 @@ def _build_output(
             })
             shipping_variants.append(base)
 
-    # Select top 3 spec-satisfying options (deduplicate: prefer variety of suppliers)
+    # ── Hard constraint: exactly 3 spec-satisfying options (if 3 exist) ──
     spec_satisfying = []
     seen_combos = set()
     for v in shipping_variants:
@@ -529,66 +529,51 @@ def _build_output(
             v["rank"] = len(spec_satisfying) + 1
             spec_satisfying.append(v)
 
-    # Build 2 constraint-relaxing options from near-miss suppliers
+    # Collect IDs already used by spec-satisfying options
+    spec_supplier_ids = {v["supplier_id"] for v in spec_satisfying}
+
+    # ── Hard constraint: exactly 2 constraint-relaxing options ──
+    # Source 1: LLM near-miss results (richest data — includes gap descriptions)
     near_miss_list = (near_miss_result or {}).get("near_miss_suppliers", [])
     constraint_relaxing = []
-    for nm in near_miss_list[:4]:  # Consider up to 4 near-miss to fill 2 slots
+    used_relaxed_ids = set()
+
+    for nm in near_miss_list:
         if len(constraint_relaxing) >= 2:
             break
         nm_sid = nm.get("supplier_id", "")
-        nm_match = next(
-            (s for s in supplier_results if s.supplier_id == nm_sid),
-            None,
+        if nm_sid in spec_supplier_ids or nm_sid in used_relaxed_ids:
+            continue
+        used_relaxed_ids.add(nm_sid)
+        constraint_relaxing.append(
+            _build_relaxed_entry_from_near_miss(
+                nm, supplier_results, prs, len(spec_satisfying) + len(constraint_relaxing) + 1,
+            )
         )
-        relaxed_reqs = nm.get("relaxed_requirements", [])
-        constraints_relaxed_labels = [
-            r.get("requirement", "unknown") + ": " + r.get("gap_description", "")
-            for r in relaxed_reqs
-        ]
-        nm_entry = {
-            "rank": len(spec_satisfying) + len(constraint_relaxing) + 1,
-            "supplier_id": nm_sid,
-            "supplier_name": nm.get("supplier_name", ""),
-            "preferred": nm_match.preferred if nm_match else False,
-            "incumbent": nm_match.incumbent if nm_match else False,
-            "recommendation_note": nm.get("overall_near_miss_rationale", ""),
-            "option_type": "constraint_relaxing",
-            "constraints_relaxed": constraints_relaxed_labels,
-            "relaxed_requirements": relaxed_reqs,
-            "recommended_action": nm.get("recommended_action", ""),
-            "shipping_type": "standard",
-            "currency": prs.currency.value or "EUR",
-        }
-        if nm_match and nm_match.pricing:
-            p = nm_match.pricing
-            nm_entry.update({
-                "pricing_tier_applied": p.get("tier_label", ""),
-                "unit_price": p.get("unit_price", 0),
-                "total_price": p.get("total_price", 0),
-                "lead_time_days": p.get("standard_lead_time_days", 0),
-                "standard_lead_time_days": p.get("standard_lead_time_days", 0),
-                "expedited_lead_time_days": p.get("expedited_lead_time_days", 0),
-                "expedited_unit_price": p.get("expedited_unit_price", 0),
-                "expedited_total": p.get("expedited_total", 0),
-                "quality_score": nm_match.scores.get("quality_score", 0),
-                "risk_score": nm_match.scores.get("risk_score", 0),
-                "esg_score": nm_match.scores.get("esg_score", 0),
-                "policy_compliant": not nm_match.hard_fail,
-                "covers_delivery_country": nm_match.covers_delivery_country,
-                "pricing_model": p.get("pricing_model", ""),
-                "pricing_id": p.get("pricing_id", ""),
-                "pricing_data_source": "pricing.csv",
-            })
-        elif nm_match:
-            nm_entry.update({
-                "quality_score": nm_match.scores.get("quality_score", 0),
-                "risk_score": nm_match.scores.get("risk_score", 0),
-                "esg_score": nm_match.scores.get("esg_score", 0),
-                "policy_compliant": not nm_match.hard_fail,
-                "covers_delivery_country": nm_match.covers_delivery_country,
-                "lead_time_days": 0,
-            })
-        constraint_relaxing.append(nm_entry)
+
+    # Source 2: Deterministic soft-fail suppliers (fallback when LLM near-miss
+    # didn't return enough). Sorted by total_penalty so the "closest" soft-fail
+    # suppliers are chosen first.
+    if len(constraint_relaxing) < 2:
+        soft_fail_candidates = sorted(
+            [
+                s for s in supplier_results
+                if not s.hard_fail
+                and s.failure_bitmask != 0
+                and s.supplier_id not in spec_supplier_ids
+                and s.supplier_id not in used_relaxed_ids
+            ],
+            key=lambda s: s.total_penalty,
+        )
+        for sf in soft_fail_candidates:
+            if len(constraint_relaxing) >= 2:
+                break
+            used_relaxed_ids.add(sf.supplier_id)
+            constraint_relaxing.append(
+                _build_relaxed_entry_from_constraint_result(
+                    sf, prs, len(spec_satisfying) + len(constraint_relaxing) + 1,
+                )
+            )
 
     # Combine all options and compute comparative advantages
     supplier_shortlist = spec_satisfying + constraint_relaxing
@@ -669,6 +654,152 @@ def _build_output(
         "near_miss_suppliers": (near_miss_result or {}).get("near_miss_suppliers", []),
         "prs": json.loads(prs.model_dump_json()),
     }
+
+
+def _build_relaxed_entry_from_near_miss(nm, supplier_results, prs, rank):
+    """Build a constraint-relaxing shortlist entry from an LLM near-miss result."""
+    from backend.models.constraint import ConstraintFlag
+
+    nm_sid = nm.get("supplier_id", "")
+    nm_match = next(
+        (s for s in supplier_results if s.supplier_id == nm_sid), None,
+    )
+    relaxed_reqs = nm.get("relaxed_requirements", [])
+    constraints_relaxed_labels = [
+        r.get("requirement", "unknown") + ": " + r.get("gap_description", "")
+        for r in relaxed_reqs
+    ]
+    entry = {
+        "rank": rank,
+        "supplier_id": nm_sid,
+        "supplier_name": nm.get("supplier_name", ""),
+        "preferred": nm_match.preferred if nm_match else False,
+        "incumbent": nm_match.incumbent if nm_match else False,
+        "recommendation_note": nm.get("overall_near_miss_rationale", ""),
+        "option_type": "constraint_relaxing",
+        "constraints_relaxed": constraints_relaxed_labels,
+        "relaxed_requirements": relaxed_reqs,
+        "recommended_action": nm.get("recommended_action", ""),
+        "shipping_type": "standard",
+        "currency": prs.currency.value or "EUR",
+    }
+    if nm_match and nm_match.pricing:
+        p = nm_match.pricing
+        entry.update({
+            "pricing_tier_applied": p.get("tier_label", ""),
+            "unit_price": p.get("unit_price", 0),
+            "total_price": p.get("total_price", 0),
+            "lead_time_days": p.get("standard_lead_time_days", 0),
+            "standard_lead_time_days": p.get("standard_lead_time_days", 0),
+            "expedited_lead_time_days": p.get("expedited_lead_time_days", 0),
+            "expedited_unit_price": p.get("expedited_unit_price", 0),
+            "expedited_total": p.get("expedited_total", 0),
+            "quality_score": nm_match.scores.get("quality_score", 0),
+            "risk_score": nm_match.scores.get("risk_score", 0),
+            "esg_score": nm_match.scores.get("esg_score", 0),
+            "policy_compliant": not nm_match.hard_fail,
+            "covers_delivery_country": nm_match.covers_delivery_country,
+            "pricing_model": p.get("pricing_model", ""),
+            "pricing_id": p.get("pricing_id", ""),
+            "pricing_data_source": "pricing.csv",
+        })
+    elif nm_match:
+        entry.update({
+            "quality_score": nm_match.scores.get("quality_score", 0),
+            "risk_score": nm_match.scores.get("risk_score", 0),
+            "esg_score": nm_match.scores.get("esg_score", 0),
+            "policy_compliant": not nm_match.hard_fail,
+            "covers_delivery_country": nm_match.covers_delivery_country,
+            "lead_time_days": 0,
+        })
+    return entry
+
+
+def _build_relaxed_entry_from_constraint_result(sf, prs, rank):
+    """Build a constraint-relaxing shortlist entry from a deterministic
+    SupplierConstraintResult that failed only soft constraints.
+
+    This is the fallback when the LLM near-miss search didn't return enough
+    suppliers. We derive the relaxed-constraint descriptions directly from
+    the bitmask and constraint_details.
+    """
+    from backend.models.constraint import ConstraintFlag
+    from backend.stages.branch_b_relaxation import _describe_relaxation
+
+    # Identify which soft constraints failed
+    failed_details = [
+        d for d in sf.constraint_details if d.get("status") == "fail"
+    ]
+    constraints_relaxed_labels = []
+    relaxed_reqs = []
+    for d in failed_details:
+        constraint_name = d.get("constraint", "")
+        reason = d.get("reason", "")
+        # Build a human-readable label
+        try:
+            flag = ConstraintFlag[constraint_name]
+            description = _describe_relaxation(flag)
+        except (KeyError, ValueError):
+            description = f"Relax {constraint_name}"
+        constraints_relaxed_labels.append(
+            f"{constraint_name}: {reason}" if reason else constraint_name
+        )
+        relaxed_reqs.append({
+            "requirement": constraint_name.lower().replace("_", " "),
+            "original_value": "as specified",
+            "supplier_value": reason or "does not meet requirement",
+            "gap_description": reason or description,
+            "risk_assessment": "Medium — requires human review",
+        })
+
+    entry = {
+        "rank": rank,
+        "supplier_id": sf.supplier_id,
+        "supplier_name": sf.supplier_name,
+        "preferred": sf.preferred,
+        "incumbent": sf.incumbent,
+        "recommendation_note": (
+            f"Nearly meets specification. Soft constraints not satisfied: "
+            f"{', '.join(c.get('constraint', '') for c in failed_details)}. "
+            f"Penalty score: {sf.total_penalty}."
+        ),
+        "option_type": "constraint_relaxing",
+        "constraints_relaxed": constraints_relaxed_labels,
+        "relaxed_requirements": relaxed_reqs,
+        "recommended_action": "Review the listed constraint gaps and approve if acceptable.",
+        "shipping_type": "standard",
+        "currency": prs.currency.value or "EUR",
+    }
+    if sf.pricing:
+        p = sf.pricing
+        entry.update({
+            "pricing_tier_applied": p.get("tier_label", ""),
+            "unit_price": p.get("unit_price", 0),
+            "total_price": p.get("total_price", 0),
+            "lead_time_days": p.get("standard_lead_time_days", 0),
+            "standard_lead_time_days": p.get("standard_lead_time_days", 0),
+            "expedited_lead_time_days": p.get("expedited_lead_time_days", 0),
+            "expedited_unit_price": p.get("expedited_unit_price", 0),
+            "expedited_total": p.get("expedited_total", 0),
+            "quality_score": sf.scores.get("quality_score", 0),
+            "risk_score": sf.scores.get("risk_score", 0),
+            "esg_score": sf.scores.get("esg_score", 0),
+            "policy_compliant": not sf.hard_fail,
+            "covers_delivery_country": sf.covers_delivery_country,
+            "pricing_model": p.get("pricing_model", ""),
+            "pricing_id": p.get("pricing_id", ""),
+            "pricing_data_source": "pricing.csv",
+        })
+    else:
+        entry.update({
+            "quality_score": sf.scores.get("quality_score", 0),
+            "risk_score": sf.scores.get("risk_score", 0),
+            "esg_score": sf.scores.get("esg_score", 0),
+            "policy_compliant": not sf.hard_fail,
+            "covers_delivery_country": sf.covers_delivery_country,
+            "lead_time_days": 0,
+        })
+    return entry
 
 
 def _compute_comparative_advantages(options: list[dict]):
