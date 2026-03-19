@@ -1,0 +1,252 @@
+{
+  "approval_thresholds": {
+    "classification": "deterministic",
+    "description": "All approval threshold rules (AT-001 to AT-015) are pure numeric range checks on currency and amount.",
+    "rule_ids": [
+      "AT-001", "AT-002", "AT-003", "AT-004", "AT-005",
+      "AT-006", "AT-007", "AT-008", "AT-009", "AT-010",
+      "AT-011", "AT-012", "AT-013", "AT-014", "AT-015"
+    ],
+    "check_function": "check_approval_thresholds",
+    "gate_fields": ["currency", "estimated_total_value"]
+  },
+  "preferred_suppliers": {
+    "classification": "deterministic",
+    "description": "All preferred supplier entries are pure lookups by (supplier_id, category_l1, category_l2, region_scope).",
+    "check_function": "check_preferred_suppliers",
+    "gate_fields": ["supplier_id", "category_l1", "category_l2", "delivery_countries"]
+  },
+  "restricted_suppliers": {
+    "classification": "deterministic",
+    "description": "All restricted supplier entries are country-scope or value-conditional checks.",
+    "check_function": "check_restricted_suppliers",
+    "gate_fields": ["supplier_id", "category_l1", "category_l2", "delivery_countries", "estimated_total_value"]
+  },
+  "category_rules": {
+    "CR-001": {
+      "classification": "deterministic",
+      "rule_text": "At least three compliant supplier options must be compared above EUR/CHF 100000",
+      "check_function": "check_cr001",
+      "gate_fields": ["currency", "estimated_total_value"],
+      "gate": {
+        "estimated_value_gt": 100000,
+        "currency_in": ["EUR", "CHF"]
+      },
+      "check_logic": "Count non-hard-fail suppliers from stage4 results >= 3"
+    },
+    "CR-002": {
+      "classification": "semi",
+      "rule_text": "Mobile workstation requests above 50 units require compatibility review with engineering or CAD lead",
+      "gate": {
+        "category_l2": "Mobile Workstations",
+        "quantity_gt": 50
+      },
+      "llm_question": "Is there evidence in the request text that a compatibility review with engineering or CAD lead has been completed or is planned?"
+    },
+    "CR-003": {
+      "classification": "deterministic",
+      "rule_text": "Break-fix pool replenishment below EUR/CHF 75000 may use fast-track approval with one quote",
+      "check_function": "check_cr003",
+      "gate": {
+        "category_l2": "Replacement / Break-Fix Pool Devices",
+        "estimated_value_lt": 75000,
+        "currency_in": ["EUR", "CHF"]
+      },
+      "check_logic": "If amount < 75000 and correct category, fast-track eligible (1 quote sufficient)"
+    },
+    "CR-004": {
+      "classification": "deterministic",
+      "rule_text": "Requests marked with data residency constraint must be evaluated only against suppliers supporting residency requirements",
+      "check_function": "check_cr004",
+      "gate_fields": ["data_residency_required"],
+      "check_logic": "If data_residency_required, verify all shortlisted suppliers have data_residency_supported == true"
+    },
+    "CR-005": {
+      "classification": "semi",
+      "rule_text": "Managed platform requests above EUR/CHF 250000 require security architecture review",
+      "gate": {
+        "category_l2": "Managed Cloud Platform Services",
+        "estimated_value_gt": 250000,
+        "currency_in": ["EUR", "CHF"]
+      },
+      "llm_question": "Is there evidence in the request text that a security architecture review has been completed, is planned, or has been requested?"
+    },
+    "CR-006": {
+      "classification": "qualitative",
+      "rule_text": "Reception and lounge projects require business design sign-off before award",
+      "applies_when": {
+        "category_l2": "Reception and Lounge Furniture"
+      },
+      "llm_question": "Is there evidence in the request text that business design sign-off has been obtained or is planned before award?"
+    },
+    "CR-007": {
+      "classification": "semi",
+      "rule_text": "Named consultant CVs or equivalent capability profiles are required above 60 consulting days",
+      "gate": {
+        "category_l2": "Software Development Services",
+        "quantity_gt": 60,
+        "unit_of_measure": "day"
+      },
+      "llm_question": "Is there evidence in the request text that named consultant CVs or equivalent capability profiles have been provided or will be required?"
+    },
+    "CR-008": {
+      "classification": "qualitative",
+      "rule_text": "Cybersecurity advisory suppliers must demonstrate relevant certifications or equivalent references",
+      "applies_when": {
+        "category_l2": "Cybersecurity Advisory"
+      },
+      "llm_question": "Does the request text mention or require that suppliers demonstrate relevant cybersecurity certifications (e.g., ISO 27001, CREST, OSCP) or equivalent references?"
+    },
+    "CR-009": {
+      "classification": "qualitative",
+      "rule_text": "SEM proposals should include performance baseline or benchmark assumptions",
+      "applies_when": {
+        "category_l2": "Search Engine Marketing (SEM)"
+      },
+      "llm_question": "Does the request text mention or require performance baselines, benchmarks, or KPI assumptions for the SEM proposal?"
+    },
+    "CR-010": {
+      "classification": "qualitative",
+      "rule_text": "Influencer campaigns require brand-safety review before final award",
+      "applies_when": {
+        "category_l2": "Influencer Campaign Management"
+      },
+      "llm_question": "Is there evidence in the request text that a brand-safety review has been completed or is planned before final award?"
+    }
+  },
+  "geography_rules": {
+    "GR-001": {
+      "classification": "semi",
+      "rule_text": "Swiss data residency-sensitive cloud requests prefer sovereign or approved providers",
+      "gate": {
+        "country": "CH",
+        "data_residency_required": true
+      },
+      "llm_question": "Based on the request context, are the shortlisted suppliers considered sovereign or approved providers for Swiss data residency requirements?"
+    },
+    "GR-002": {
+      "classification": "semi",
+      "rule_text": "Urgent end-user-device requests in Germany require delivery capability within requested deadline",
+      "gate": {
+        "country": "DE",
+        "category_l1": "IT",
+        "is_urgent": true
+      },
+      "llm_question": "Based on the request text, does the supplier demonstrate delivery capability within the requested deadline for this urgent German order?"
+    },
+    "GR-003": {
+      "classification": "qualitative",
+      "rule_text": "Business-facing services for France should support French-language delivery where relevant",
+      "applies_when": {
+        "country": "FR",
+        "category_l1_in": ["Professional Services", "Marketing"]
+      },
+      "llm_question": "Does the request text indicate whether French-language delivery support is needed, and if so, can the suppliers provide it?"
+    },
+    "GR-004": {
+      "classification": "qualitative",
+      "rule_text": "Large furniture and device rollouts in Spain should evidence installation or deployment support",
+      "applies_when": {
+        "country": "ES",
+        "category_l1_in": ["Facilities", "IT"]
+      },
+      "llm_question": "Does the request appear to be a large rollout, and if so, is there evidence of installation or deployment support from suppliers?"
+    },
+    "GR-005": {
+      "classification": "semi",
+      "rule_text": "US data sovereignty: financial and healthcare data must remain in-country; verify supplier US data centre availability for sensitive workloads",
+      "gate": {
+        "country_in": ["US", "CA", "BR", "MX"],
+        "category_l1_in": ["IT", "Professional Services"]
+      },
+      "llm_question": "Does the request involve financial or healthcare data that requires US data sovereignty, and do the shortlisted suppliers have US data centre availability?"
+    },
+    "GR-006": {
+      "classification": "semi",
+      "rule_text": "APAC data localisation: India RBI, Singapore MAS, and Japan FISC guidelines apply to financial data. Verify supplier in-country data residency for regulated categories.",
+      "gate": {
+        "country_in": ["SG", "AU", "JP", "IN"],
+        "category_l1_in": ["IT", "Professional Services"]
+      },
+      "llm_question": "Does the request involve regulated financial data subject to APAC data localisation requirements (RBI/MAS/FISC), and do the suppliers support in-country data residency?"
+    },
+    "GR-007": {
+      "classification": "semi",
+      "rule_text": "UAE PDPL and South Africa POPIA compliance required for personal data processing. Validate supplier compliance documentation before award.",
+      "gate": {
+        "country_in": ["UAE", "ZA"],
+        "category_l1_in": ["IT", "Professional Services"]
+      },
+      "llm_question": "Does the request involve personal data processing in UAE or South Africa, and is there evidence of supplier PDPL/POPIA compliance documentation?"
+    },
+    "GR-008": {
+      "classification": "semi",
+      "rule_text": "Brazil LGPD and Mexico LFPDPPP apply. Data processing agreements (DPA) must be in place before contract signature.",
+      "gate": {
+        "country_in": ["BR", "MX"],
+        "category_l1_in": ["IT", "Professional Services", "Marketing"]
+      },
+      "llm_question": "Does the request involve data processing in Brazil or Mexico, and is there evidence that DPA requirements (LGPD/LFPDPPP) have been addressed?"
+    }
+  },
+  "escalation_rules": {
+    "ER-001": {
+      "classification": "deterministic",
+      "trigger": "missing_required_information",
+      "check_function": "check_er001",
+      "check_logic": "Check PRS field completeness — are required fields (category, quantity, budget, currency, delivery_countries) populated with confidence > 0.5?"
+    },
+    "ER-002": {
+      "classification": "deterministic",
+      "trigger": "preferred_supplier_restricted",
+      "check_function": "check_er002",
+      "check_logic": "Cross-reference: is any preferred supplier for this category also in the restricted list for the delivery countries?"
+    },
+    "ER-003": {
+      "classification": "deterministic",
+      "trigger": "value_exceeds_threshold",
+      "check_function": "check_er003",
+      "check_logic": "Does estimated_total_value exceed the highest standard threshold for the currency?"
+    },
+    "ER-004": {
+      "classification": "deterministic",
+      "trigger": "no_compliant_supplier_found",
+      "check_function": "check_er004",
+      "check_logic": "Count of non-hard-fail suppliers from stage4 == 0"
+    },
+    "ER-005": {
+      "classification": "deterministic",
+      "trigger": "data_residency_constraint_conflict",
+      "check_function": "check_er005",
+      "check_logic": "data_residency_required == true AND no supplier in stage4 results has data_residency_supported"
+    },
+    "ER-006": {
+      "classification": "deterministic",
+      "trigger": "single_supplier_capacity_risk",
+      "check_function": "check_er006",
+      "check_logic": "Exactly 1 non-hard-fail supplier in stage4 results"
+    },
+    "ER-007": {
+      "classification": "deterministic",
+      "trigger": "brand_safety_review_needed",
+      "check_function": "check_er007",
+      "check_logic": "category_l2 == 'Influencer Campaign Management'"
+    },
+    "ER-008": {
+      "classification": "semi",
+      "trigger": "Supplier not registered or sanctioned-screened in delivery country",
+      "gate": {
+        "currency": "USD"
+      },
+      "llm_question": "Is there any indication in the request or supplier data that the supplier is not registered or has not been sanctioned-screened in the delivery country?"
+    }
+  },
+  "_metadata": {
+    "version": "1.0",
+    "total_deterministic": 76,
+    "total_semi_deterministic": 10,
+    "total_qualitative": 6,
+    "confidence_threshold_for_human_review": 0.7,
+    "description": "Classification of all policies in policies.json into deterministic (pure Python), semi-deterministic (deterministic gate + LLM tail), and qualitative (LLM-only) categories."
+  }
+}

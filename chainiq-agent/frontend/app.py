@@ -598,50 +598,97 @@ def _render_main_area(selected_id, requests_list, total):
 
     _render_results(cached) if callable(globals().get("_render_results")) else None
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "Interpretation", "Policy", "Suppliers", "Recommendation",
-        "Escalations", "Near-Miss Options", "Audit Trail",
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Interpretation", "Suppliers", "Escalations", "Audit Trail",
     ])
 
     with tab1:
         _render_interpretation(cached)
 
     with tab2:
-        _render_policy(cached)
+        _render_suppliers(cached, selected_id)
 
     with tab3:
-        _render_suppliers(cached)
-
-    with tab4:
-        _render_recommendation(cached)
-
-    with tab5:
         _render_escalations(cached, selected_id)
 
-    with tab6:
-        _render_near_miss(cached, selected_id)
-
-    with tab7:
+    with tab4:
         _render_audit_trail(cached)
 
 
 def _render_interpretation(result):
     interp = result.get("request_interpretation", {})
     validation = result.get("validation", {})
+    policy = result.get("policy_evaluation", {})
 
-    col1, col2 = st.columns(2)
+    # ── Key metrics row ──
+    st.markdown("### Request Specification")
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        cat = interp.get("category_l1", "N/A")
+        cat2 = interp.get("category_l2", "")
+        st.metric("Category", f"{cat}" + (f" > {cat2}" if cat2 else ""))
+    with m2:
+        budget = interp.get("budget_amount", "N/A")
+        currency = interp.get("currency", "")
+        if budget and budget != "N/A":
+            st.metric("Budget", f"{currency} {budget:,.2f}" if isinstance(budget, (int, float)) else f"{currency} {budget}")
+        else:
+            st.metric("Budget", "Not specified")
+    with m3:
+        qty = interp.get("quantity", "N/A")
+        uom = interp.get("unit_of_measure", "")
+        st.metric("Quantity", f"{qty} {uom}" if qty and qty != "N/A" else "N/A")
+    with m4:
+        deadline = interp.get("required_by_date", "N/A")
+        st.metric("Required By", deadline if deadline else "N/A")
 
-    with col1:
-        st.markdown("### Extracted Fields")
-        for key, value in interp.items():
-            if value is not None:
-                st.markdown(f"**{key.replace('_', ' ').title()}:** {value}")
+    st.markdown("---")
 
-    with col2:
+    # ── Two-column detail layout ──
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.markdown("#### Delivery & Logistics")
+        countries = interp.get("delivery_countries", [])
+        if isinstance(countries, list) and countries:
+            st.markdown(f"**Delivery Countries:** {', '.join(countries)}")
+        else:
+            st.markdown(f"**Delivery Countries:** {countries or 'N/A'}")
+        st.markdown(f"**Data Residency Required:** {'Yes' if interp.get('data_residency_required') else 'No'}")
+        st.markdown(f"**ESG Requirement:** {'Yes' if interp.get('esg_requirement') else 'No'}")
+        st.markdown(f"**Contract Type:** {interp.get('contract_type', 'N/A')}")
+
+        st.markdown("#### Supplier Preferences")
+        pref = interp.get("preferred_supplier_stated", "")
+        inc = interp.get("incumbent_supplier", "")
+        st.markdown(f"**Preferred Supplier:** {pref if pref else 'None stated'}")
+        st.markdown(f"**Incumbent:** {inc if inc else 'None'}")
+
+    with col_right:
+        st.markdown("#### Request Metadata")
+        st.markdown(f"**Language:** {interp.get('request_language', 'N/A')}")
+        st.markdown(f"**Channel:** {interp.get('request_channel', 'N/A')}")
+        st.markdown(f"**Business Unit:** {interp.get('business_unit', 'N/A')}")
+        if interp.get("requester_instruction"):
+            st.markdown(f"**Requester Note:** {interp['requester_instruction']}")
+        if interp.get("translated_text"):
+            with st.expander("Translated Text"):
+                st.markdown(interp["translated_text"])
+
+        # Policy summary
+        threshold = policy.get("approval_threshold", {})
+        if threshold:
+            st.markdown("#### Approval Policy")
+            st.markdown(f"**Threshold Tier:** {threshold.get('applicable_threshold', 'N/A')}")
+            st.markdown(f"**Quotes Required:** {threshold.get('quotes_required', 'N/A')}")
+            if threshold.get("basis"):
+                st.caption(threshold["basis"])
+
+    # ── Validation issues ──
+    issues = validation.get("issues_detected", [])
+    if issues:
+        st.markdown("---")
         st.markdown("### Validation Issues")
-        issues = validation.get("issues_detected", [])
-        if not issues:
-            st.success("No validation issues detected")
         for issue in issues:
             severity = issue.get("severity", "medium")
             icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
@@ -649,56 +696,8 @@ def _render_interpretation(result):
             st.markdown(f"  {issue.get('description', '')}")
             if issue.get("action_required"):
                 st.markdown(f"  *Action:* {issue['action_required']}")
-
-
-def _render_policy(result):
-    policy = result.get("policy_evaluation", {})
-
-    # Threshold
-    threshold = policy.get("approval_threshold", {})
-    if threshold:
-        st.markdown("### Approval Threshold")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Threshold Tier", threshold.get("applicable_threshold", "N/A"))
-        with col2:
-            st.metric("Quotes Required", threshold.get("quotes_required", "N/A"))
-        with col3:
-            st.metric("Deviation Approval", threshold.get("deviation_approval", "N/A"))
-        if threshold.get("basis"):
-            st.info(threshold["basis"])
-
-    # Preferred supplier
-    pref = policy.get("preferred_supplier", {})
-    if pref:
-        st.markdown("### Preferred Supplier Analysis")
-        st.markdown(f"**Supplier:** {pref.get('supplier_name', 'N/A')}")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            is_pref = pref.get("is_preferred", False)
-            st.markdown(f"Preferred: {'✅' if is_pref else '❌'}")
-        with col2:
-            is_rest = pref.get("is_restricted", False)
-            st.markdown(f"Restricted: {'🔴 Yes' if is_rest else '✅ No'}")
-        with col3:
-            covers = pref.get("covers_delivery", False)
-            st.markdown(f"Covers Delivery: {'✅' if covers else '❌'}")
-
-    # Category rules
-    cat_rules = policy.get("category_rules_applied", [])
-    if cat_rules:
-        st.markdown("### Category Rules")
-        for rule in cat_rules:
-            applies = rule.get("applies", False)
-            st.markdown(f"{'✅' if applies else '⬜'} **{rule.get('rule_id', '')}**: {rule.get('note', '')}")
-
-    # Geography rules
-    geo_rules = policy.get("geography_rules_applied", [])
-    if geo_rules:
-        st.markdown("### Geography Rules")
-        for rule in geo_rules:
-            applies = rule.get("applies", False)
-            st.markdown(f"{'✅' if applies else '⬜'} **{rule.get('rule_id', '')}**: {rule.get('note', '')}")
+    else:
+        st.success("No validation issues detected")
 
 
 def _has_unresolved_blocking_escalations(result):
@@ -713,155 +712,210 @@ def _has_unresolved_blocking_escalations(result):
     return False
 
 
-def _render_suppliers(result):
+def _render_suppliers(result, request_id=None):
     shortlist = result.get("supplier_shortlist", [])
-    excluded = result.get("suppliers_excluded", [])
-    provisional = _has_unresolved_blocking_escalations(result)
-    reevaluated = result.get("reevaluated", False)
-
-    if reevaluated:
-        st.success(
-            "**FINAL RESULTS** — These rankings have been re-evaluated after all escalations were resolved."
-        )
-    elif provisional:
-        st.warning(
-            "**PROVISIONAL RESULTS** — There are unresolved blocking escalations that may "
-            "change these rankings. Review the Escalations tab to resolve them before proceeding."
-        )
-
-    if shortlist:
-        if reevaluated:
-            heading = "Ranked Supplier Comparison (FINAL)"
-        elif provisional:
-            heading = "Ranked Supplier Comparison (PROVISIONAL)"
-        else:
-            heading = "Ranked Supplier Comparison"
-        st.markdown(f"### {heading}")
-
-        # Radar chart for top suppliers
-        if len(shortlist) >= 2:
-            categories_radar = ["Price", "Lead Time", "Quality", "Risk (inv)", "ESG"]
-            fig = go.Figure()
-
-            for s in shortlist[:3]:
-                # Normalize scores for radar
-                max_price = max(e.get("total_price", 1) for e in shortlist) or 1
-                price_score = 100 * (1 - s.get("total_price", 0) / max_price) if max_price else 50
-                lead_score = 100 * (1 - min(s.get("standard_lead_time_days", 30), 60) / 60)
-                quality = s.get("quality_score", 50)
-                risk_inv = 100 - s.get("risk_score", 50)
-                esg = s.get("esg_score", 50)
-
-                fig.add_trace(go.Scatterpolar(
-                    r=[price_score, lead_score, quality, risk_inv, esg],
-                    theta=categories_radar,
-                    fill="toself",
-                    name=f"#{s['rank']} {s['supplier_name']}",
-                ))
-
-            fig.update_layout(
-                polar=dict(bgcolor="#1a1f2e", radialaxis=dict(visible=True, range=[0, 100])),
-                showlegend=True,
-                paper_bgcolor="#0e1117",
-                font=dict(color="white"),
-                height=400,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Detailed supplier cards
-        for s in shortlist:
-            rank = s.get("rank", 0)
-            rank_color = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"#{rank}")
-
-            st.markdown(f"### {rank_color} {s.get('supplier_name', '')}")
-
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Price", f"{s.get('currency', '')} {s.get('total_price', 0):,.2f}")
-            with col2:
-                st.metric("Unit Price", f"{s.get('currency', '')} {s.get('unit_price', 0):,.2f}")
-            with col3:
-                st.metric("Lead Time (std)", f"{s.get('standard_lead_time_days', 'N/A')}d")
-            with col4:
-                st.metric("Lead Time (exp)", f"{s.get('expedited_lead_time_days', 'N/A')}d")
-
-            col5, col6, col7, col8 = st.columns(4)
-            with col5:
-                st.metric("Quality", s.get("quality_score", "N/A"))
-            with col6:
-                st.metric("Risk", s.get("risk_score", "N/A"))
-            with col7:
-                st.metric("ESG", s.get("esg_score", "N/A"))
-            with col8:
-                labels = []
-                if s.get("preferred"): labels.append("Preferred")
-                if s.get("incumbent"): labels.append("Incumbent")
-                st.markdown(" ".join(f"`{l}`" for l in labels) if labels else "")
-
-            if s.get("recommendation_note"):
-                st.info(s["recommendation_note"])
-
-            st.markdown("---")
-
-    if excluded:
-        st.markdown("### Excluded Suppliers")
-        for s in excluded:
-            st.markdown(f"❌ **{s.get('supplier_name', '')}** ({s.get('supplier_id', '')}): {s.get('reason', '')}")
-
-
-def _render_recommendation(result):
+    near_miss = result.get("near_miss_suppliers", [])
     rec = result.get("recommendation", {})
     branch = result.get("branch", "A")
     relaxations = result.get("relaxations", [])
     provisional = _has_unresolved_blocking_escalations(result)
     reevaluated = result.get("reevaluated", False)
 
+    # ── Status banner ──
     if reevaluated:
-        st.success("**Status: FINAL — Re-evaluated after escalation resolution**")
-        st.caption(f"Re-evaluated at {result.get('reevaluated_at', 'unknown')}")
+        st.success("**FINAL** — Re-evaluated after all escalations were resolved.")
     elif provisional:
-        st.warning("**Status: PROVISIONAL — Pending Escalation Resolution**")
-        st.info(
-            "This recommendation is provisional. Blocking escalations must be resolved "
-            "before this recommendation can be considered final. Go to the Escalations tab "
-            "to resolve them, then re-evaluate."
+        st.warning(
+            "**PROVISIONAL** — Unresolved blocking escalations may change these rankings. "
+            "See the Escalations tab."
         )
-        # List unresolved blocking escalations
-        unresolved = []
-        resolutions = result.get("escalation_resolutions", {})
-        for esc in result.get("escalations", []):
-            if esc.get("blocking") and not resolutions.get(esc.get("escalation_id", ""), {}).get("resolved"):
-                unresolved.append(f"- **{esc.get('escalation_id', '')}**: {esc.get('trigger', '')}")
-        if unresolved:
-            st.markdown("**Unresolved blocking escalations:**\n" + "\n".join(unresolved))
-    else:
-        status = rec.get("status", "")
-        if status == "proceed":
-            st.success("**Status: Can Proceed**")
-        elif status == "cannot_proceed":
-            st.error("**Status: Cannot Proceed**")
-        elif status == "requires_relaxation":
-            st.warning("**Status: Requires Constraint Relaxation**")
 
-    st.markdown(f"**Branch:** {'A (viable options exist)' if branch == 'A' else 'B (constraint relaxation needed)'}")
+    # ── Recommendation summary ──
+    st.markdown("### Recommendation")
+    status = rec.get("status", "")
+    if status == "proceed":
+        st.success("**Can Proceed**")
+    elif status == "cannot_proceed":
+        st.error("**Cannot Proceed**")
+    elif status == "requires_relaxation":
+        st.warning("**Requires Constraint Relaxation**")
 
-    if rec.get("reason"):
-        st.markdown(f"**Reason:** {rec['reason']}")
+    rec_cols = st.columns(2)
+    with rec_cols[0]:
+        st.markdown(f"**Branch:** {'A — viable options exist' if branch == 'A' else 'B — constraint relaxation needed'}")
+        if rec.get("reason"):
+            st.markdown(f"**Reason:** {rec['reason']}")
+    with rec_cols[1]:
+        if rec.get("preferred_supplier_if_resolved"):
+            st.markdown(f"**Top Pick:** {rec['preferred_supplier_if_resolved']}")
+            st.markdown(f"**Rationale:** {rec.get('preferred_supplier_rationale', '')}")
+        if rec.get("minimum_budget_required"):
+            st.metric("Min Budget Required", f"{rec.get('minimum_budget_currency', '')} {rec['minimum_budget_required']:,.2f}")
 
-    if rec.get("preferred_supplier_if_resolved"):
-        st.markdown(f"**Recommended Supplier:** {rec['preferred_supplier_if_resolved']}")
-        st.markdown(f"**Rationale:** {rec.get('preferred_supplier_rationale', '')}")
-
-    if rec.get("minimum_budget_required"):
-        st.metric("Minimum Budget Required", f"{rec.get('minimum_budget_currency', '')} {rec['minimum_budget_required']:,.2f}")
-
-    # Branch B relaxations
+    # ── Relaxations (Branch B) ──
     if relaxations:
-        st.markdown("### Constraint Relaxations Applied")
-        for r in relaxations:
-            st.markdown(f"⚖️ **{r.get('constraint', '')}** ({r.get('weight_class', '')})")
-            st.markdown(f"  {r.get('description', '')}")
-            st.markdown(f"  *Suppliers unlocked:* {r.get('suppliers_unlocked', 0)}")
+        with st.expander(f"Constraint Relaxations Applied ({len(relaxations)})"):
+            for r in relaxations:
+                st.markdown(f"⚖️ **{r.get('constraint', '')}** ({r.get('weight_class', '')}): {r.get('description', '')} — *{r.get('suppliers_unlocked', 0)} suppliers unlocked*")
+
+    if not shortlist and not near_miss:
+        # Distinguish "not processed" from "processed but no viable suppliers"
+        excluded = result.get("suppliers_excluded", [])
+        if excluded or rec.get("status"):
+            st.warning("No viable suppliers were found for this request after constraint evaluation.")
+            if excluded:
+                with st.expander(f"Excluded Suppliers ({len(excluded)})"):
+                    for s in excluded:
+                        st.markdown(f"❌ **{s.get('supplier_name', '')}** ({s.get('supplier_id', '')}): {s.get('reason', '')}")
+        else:
+            st.info("No ranked suppliers available yet. Process the request to see results.")
+        return
+
+    st.markdown("---")
+
+    # ── Radar chart comparison ──
+    st.markdown("### Supplier Comparison")
+    if len(shortlist) >= 2:
+        categories_radar = ["Price", "Lead Time", "Quality", "Risk (inv)", "ESG"]
+        fig = go.Figure()
+
+        for s in shortlist[:3]:
+            max_price = max(e.get("total_price", 1) for e in shortlist) or 1
+            price_score = 100 * (1 - s.get("total_price", 0) / max_price) if max_price else 50
+            lead_score = 100 * (1 - min(s.get("standard_lead_time_days", 30), 60) / 60)
+            quality = s.get("quality_score", 50)
+            risk_inv = 100 - s.get("risk_score", 50)
+            esg = s.get("esg_score", 50)
+
+            fig.add_trace(go.Scatterpolar(
+                r=[price_score, lead_score, quality, risk_inv, esg],
+                theta=categories_radar,
+                fill="toself",
+                name=f"#{s['rank']} {s['supplier_name']}",
+            ))
+
+        fig.update_layout(
+            polar=dict(bgcolor="#1a1f2e", radialaxis=dict(visible=True, range=[0, 100])),
+            showlegend=True,
+            paper_bgcolor="#0e1117",
+            font=dict(color="white"),
+            height=400,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── Top 3 supplier cards ──
+    st.markdown("### Top Ranked Suppliers")
+    for s in shortlist[:3]:
+        rank = s.get("rank", 0)
+        rank_icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"#{rank}")
+        labels = []
+        if s.get("preferred"):
+            labels.append("Preferred")
+        if s.get("incumbent"):
+            labels.append("Incumbent")
+        label_str = " ".join(f"`{l}`" for l in labels)
+
+        st.markdown(f"### {rank_icon} {s.get('supplier_name', '')} {label_str}")
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Price", f"{s.get('currency', '')} {s.get('total_price', 0):,.2f}")
+        with col2:
+            st.metric("Unit Price", f"{s.get('currency', '')} {s.get('unit_price', 0):,.2f}")
+        with col3:
+            st.metric("Lead Time", f"{s.get('standard_lead_time_days', 'N/A')}d std / {s.get('expedited_lead_time_days', 'N/A')}d exp")
+        with col4:
+            st.metric("Quality / Risk / ESG", f"{s.get('quality_score', 'N/A')} / {s.get('risk_score', 'N/A')} / {s.get('esg_score', 'N/A')}")
+
+        if s.get("recommendation_note"):
+            st.info(f"**Why this supplier:** {s['recommendation_note']}")
+
+        st.markdown("---")
+
+    # ── Additional ranked suppliers (collapsed) ──
+    if len(shortlist) > 3:
+        with st.expander(f"Other Ranked Suppliers ({len(shortlist) - 3} more)"):
+            for s in shortlist[3:]:
+                rank = s.get("rank", 0)
+                st.markdown(
+                    f"**#{rank} {s.get('supplier_name', '')}** — "
+                    f"{s.get('currency', '')} {s.get('total_price', 0):,.2f} | "
+                    f"Quality {s.get('quality_score', 'N/A')} | "
+                    f"Lead {s.get('standard_lead_time_days', 'N/A')}d"
+                )
+                if s.get("recommendation_note"):
+                    st.caption(s["recommendation_note"])
+
+    # ── Excluded suppliers ──
+    excluded = result.get("suppliers_excluded", [])
+    if excluded:
+        with st.expander(f"Excluded Suppliers ({len(excluded)})"):
+            for s in excluded:
+                st.markdown(f"❌ **{s.get('supplier_name', '')}** ({s.get('supplier_id', '')}): {s.get('reason', '')}")
+
+    # ── Near-miss suppliers ──
+    if near_miss:
+        st.markdown("---")
+        st.markdown("### Near-Miss Suppliers")
+        st.caption(
+            "These suppliers don't fully meet the spec but are close enough for human review."
+        )
+
+        for nm in near_miss:
+            supplier_id = nm.get("supplier_id", "")
+            supplier_name = nm.get("supplier_name", "")
+            decision = nm.get("human_decision")
+
+            if decision == "approved":
+                badge = "✅ APPROVED"
+            elif decision == "rejected":
+                badge = "❌ REJECTED"
+            else:
+                badge = "⏳ PENDING"
+
+            with st.expander(f"{badge} {supplier_name} ({supplier_id})"):
+                relaxed = nm.get("relaxed_requirements", [])
+                if relaxed:
+                    for req in relaxed:
+                        risk = req.get("risk_assessment", "Unknown")
+                        risk_icon = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(
+                            risk.split(" ")[0] if risk else "", "⚪"
+                        )
+                        st.markdown(
+                            f"{risk_icon} **{req.get('requirement', '')}**: "
+                            f"{req.get('original_value', 'N/A')} vs {req.get('supplier_value', 'N/A')} "
+                            f"— {req.get('gap_description', '')}"
+                        )
+
+                if nm.get("overall_near_miss_rationale"):
+                    st.info(nm["overall_near_miss_rationale"])
+
+                if decision is None and request_id:
+                    col_a, col_r = st.columns(2)
+                    with col_a:
+                        if st.button("Approve", key=f"approve_{supplier_id}", use_container_width=True, type="primary"):
+                            try:
+                                r = httpx.post(
+                                    f"{API_BASE}/near-miss/{request_id}/{supplier_id}/decide",
+                                    json={"decision": "approved"},
+                                    timeout=10,
+                                )
+                                r.raise_for_status()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed: {e}")
+                    with col_r:
+                        if st.button("Reject", key=f"reject_{supplier_id}", use_container_width=True):
+                            try:
+                                r = httpx.post(
+                                    f"{API_BASE}/near-miss/{request_id}/{supplier_id}/decide",
+                                    json={"decision": "rejected"},
+                                    timeout=10,
+                                )
+                                r.raise_for_status()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed: {e}")
 
 
 def _render_escalations(result, request_id=None):
@@ -869,72 +923,58 @@ def _render_escalations(result, request_id=None):
     resolutions = result.get("escalation_resolutions", {})
 
     if not escalations:
-        st.success("No escalations required")
+        st.markdown("### Escalations")
+        st.success("No escalations required for this request. All policies are satisfied.")
         return
 
-    # --- Escalation overview cards ---
-    st.markdown("### Escalation Overview")
     total = len(escalations)
     resolved_count = sum(
         1 for esc in escalations
         if resolutions.get(esc.get("escalation_id", ""), {}).get("resolved", False)
     )
-    blocking_count = sum(1 for esc in escalations if esc.get("blocking", False))
     unresolved_blocking = sum(
         1 for esc in escalations
         if esc.get("blocking", False)
         and not resolutions.get(esc.get("escalation_id", ""), {}).get("resolved", False)
     )
+    all_resolved = resolved_count == total
 
-    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    # ── Status header ──
+    col_m1, col_m2, col_m3 = st.columns(3)
     with col_m1:
-        st.metric("Total", total)
+        st.metric("Total Escalations", total)
     with col_m2:
         st.metric("Resolved", resolved_count)
     with col_m3:
-        st.metric("Blocking", blocking_count)
-    with col_m4:
         st.metric("Unresolved Blocking", unresolved_blocking)
 
-    # Compact escalation cards
+    # ── Escalation cards ──
     for esc in escalations:
         esc_id = esc.get("escalation_id", "")
         blocking = esc.get("blocking", False)
         resolution = resolutions.get(esc_id, {})
         is_resolved = resolution.get("resolved", False)
 
-        if is_resolved:
-            icon = "✅"
-        elif blocking:
-            icon = "🔴"
-        else:
-            icon = "🟡"
+        icon = "✅" if is_resolved else ("🔴" if blocking else "🟡")
 
-        with st.expander(f"{icon} {esc_id} — {esc.get('rule', '')} | {'Resolved' if is_resolved else 'Unresolved'}", expanded=not is_resolved):
+        with st.expander(
+            f"{icon} {esc_id} — {esc.get('rule', '')} | {'Resolved' if is_resolved else 'Unresolved'}",
+            expanded=not is_resolved,
+        ):
             st.markdown(f"**Trigger:** {esc.get('trigger', '')}")
             st.markdown(f"**Escalate To:** {esc.get('escalate_to', '')} | **Blocking:** {'Yes' if blocking else 'No'}")
             if is_resolved:
                 st.success(f"Resolution: {resolution.get('resolution_summary', 'Resolved')}")
 
-    all_resolved = resolved_count == total
-
-    # --- Re-evaluation banner ---
+    # ── Re-evaluation banner ──
     if all_resolved and not result.get("reevaluated"):
         st.markdown("---")
-        st.success("All escalations have been resolved!")
-        st.info(
-            "The current output (Interpretation, Policy, Suppliers, Recommendation) was generated "
-            "before these escalations were resolved and may be out of date. Click **Re-evaluate** "
-            "to refresh all tabs based on the escalation resolutions."
-        )
+        st.success("All escalations resolved!")
         if request_id:
             if st.button("Re-evaluate All Outputs", type="primary", use_container_width=True, key="reevaluate_btn"):
                 try:
-                    with st.spinner("Re-evaluating all outputs based on escalation resolutions..."):
-                        r = httpx.post(
-                            f"{API_BASE}/escalation/{request_id}/reevaluate",
-                            timeout=60,
-                        )
+                    with st.spinner("Re-evaluating..."):
+                        r = httpx.post(f"{API_BASE}/escalation/{request_id}/reevaluate", timeout=60)
                         r.raise_for_status()
                     st.rerun()
                 except Exception as e:
@@ -943,207 +983,73 @@ def _render_escalations(result, request_id=None):
 
     if result.get("reevaluated"):
         st.markdown("---")
-        st.success(
-            f"Output was re-evaluated at {result.get('reevaluated_at', 'unknown')} "
-            "to reflect all escalation resolutions. All tabs now show final results."
-        )
+        st.success(f"Re-evaluated at {result.get('reevaluated_at', 'unknown')}. All tabs show final results.")
         return
 
-    # --- Unified chat interface ---
+    # ── Chat interface for resolution ──
     st.markdown("---")
-    st.markdown("### Escalation Resolution Chat")
-    st.caption(
-        "Use this chat to discuss and resolve all escalations. "
-        "The assistant will identify which escalation(s) your message addresses."
-    )
+    st.markdown("### Resolution Chat")
 
-    # Load unified chat history
     unified_chat_key = f"unified_esc_chat_{request_id}"
     if unified_chat_key not in st.session_state:
         st.session_state[unified_chat_key] = result.get("_unified_chat_history", [])
 
-    # Display chat messages
-    chat_container = st.container()
-    with chat_container:
-        for msg in st.session_state[unified_chat_key]:
-            role = msg.get("role", "human")
-            with st.chat_message("user" if role == "human" else "assistant"):
-                st.write(msg.get("content", ""))
-
-    # Show initial guidance if chat is empty
-    if not st.session_state[unified_chat_key] and unresolved_blocking > 0:
+    # Show guidance when chat is empty
+    if not st.session_state[unified_chat_key]:
         unresolved_list = [
             esc for esc in escalations
             if not resolutions.get(esc.get("escalation_id", ""), {}).get("resolved", False)
         ]
-        guidance_parts = ["**Unresolved escalations to address:**"]
-        for esc in unresolved_list:
-            esc_id = esc.get("escalation_id", "")
-            guidance_parts.append(
-                f"- **{esc_id}** ({esc.get('rule', '')}): {esc.get('trigger', '')}"
-            )
-        st.info("\n".join(guidance_parts))
+        if unresolved_list:
+            parts = ["**Escalations needing resolution:**"]
+            for esc in unresolved_list:
+                parts.append(f"- **{esc.get('escalation_id', '')}** ({esc.get('rule', '')}): {esc.get('trigger', '')}")
+            st.info("\n".join(parts))
 
-    # Input area
+    # Render chat history
+    for msg in st.session_state[unified_chat_key]:
+        role = msg.get("role", "human")
+        with st.chat_message("user" if role == "human" else "assistant"):
+            st.write(msg.get("content", ""))
+
+    # Chat input
     if request_id and not all_resolved:
-        col_input, col_send = st.columns([5, 1])
-        with col_input:
-            user_msg = st.text_input(
-                "Message",
-                key="unified_esc_input",
-                label_visibility="collapsed",
-                placeholder="Provide resolution, clarification, or approval for any escalation...",
-            )
-        with col_send:
-            send_btn = st.button("Send", key="unified_esc_send", use_container_width=True)
+        user_msg = st.chat_input("Provide information or approve an escalation...", key="esc_chat_input")
 
-        # Manual resolve buttons for individual escalations
-        st.markdown("**Quick resolve:**")
-        resolve_cols = st.columns(min(len(escalations), 4))
-        for idx, esc in enumerate(escalations):
-            esc_id = esc.get("escalation_id", "")
-            is_resolved = resolutions.get(esc_id, {}).get("resolved", False)
-            if not is_resolved:
-                col = resolve_cols[idx % len(resolve_cols)]
-                with col:
-                    if st.button(f"Resolve {esc_id}", key=f"resolve_{esc_id}", use_container_width=True):
-                        try:
-                            r = httpx.post(
-                                f"{API_BASE}/escalation/{request_id}/{esc_id}/resolve",
-                                timeout=10,
-                            )
-                            r.raise_for_status()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Failed to resolve {esc_id}: {e}")
+        if user_msg:
+            st.session_state[unified_chat_key].append({"role": "human", "content": user_msg})
+            with st.chat_message("user"):
+                st.write(user_msg)
 
-        if send_btn and user_msg:
-            try:
-                r = httpx.post(
-                    f"{API_BASE}/escalation/{request_id}/chat-unified",
-                    json={"message": user_msg},
-                    timeout=30,
-                )
-                r.raise_for_status()
-                updated = r.json()
-                st.session_state[unified_chat_key] = updated.get("chat_history", [])
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed to send message: {e}")
-
-
-def _render_near_miss(result, request_id=None):
-    near_miss = result.get("near_miss_suppliers", [])
-
-    if not near_miss:
-        st.info("No near-miss options identified. All viable suppliers are shown in the Suppliers tab.")
-        return
-
-    st.markdown("### Near-Miss Supplier Options")
-    st.warning(
-        "The suppliers below do **not** fully satisfy the specification. "
-        "They are presented for human review because the gaps are small enough to potentially accept."
-    )
-
-    for nm in near_miss:
-        supplier_id = nm.get("supplier_id", "")
-        supplier_name = nm.get("supplier_name", "")
-        decision = nm.get("human_decision")
-
-        # Decision badge
-        if decision == "approved":
-            badge = "✅ APPROVED"
-        elif decision == "rejected":
-            badge = "❌ REJECTED"
-        else:
-            badge = "⏳ PENDING REVIEW"
-
-        st.markdown(f"### {supplier_name} ({supplier_id}) — {badge}")
-
-        # Relaxed requirements breakdown
-        relaxed = nm.get("relaxed_requirements", [])
-        if relaxed:
-            st.markdown("**Requirements not met:**")
-            for req in relaxed:
-                risk = req.get("risk_assessment", "Unknown")
-                risk_color = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(
-                    risk.split(" ")[0] if risk else "", "⚪"
-                )
-                st.markdown(f"""
-{risk_color} **{req.get('requirement', '')}**
-- **Required:** {req.get('original_value', 'N/A')}
-- **Supplier offers:** {req.get('supplier_value', 'N/A')}
-- **Gap:** {req.get('gap_description', 'N/A')}
-- **Risk:** {req.get('risk_assessment', 'N/A')}
-""")
-
-        if nm.get("overall_near_miss_rationale"):
-            st.info(f"**Rationale:** {nm['overall_near_miss_rationale']}")
-
-        if nm.get("recommended_action"):
-            st.markdown(f"**Recommended action:** {nm['recommended_action']}")
-
-        # Approve/Reject buttons (only if no decision yet)
-        if decision is None and request_id:
-            col_approve, col_reject = st.columns(2)
-            with col_approve:
-                if st.button(f"Approve", key=f"approve_{supplier_id}", use_container_width=True, type="primary"):
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
                     try:
                         r = httpx.post(
-                            f"{API_BASE}/near-miss/{request_id}/{supplier_id}/decide",
-                            json={"decision": "approved"},
-                            timeout=10,
+                            f"{API_BASE}/escalation/{request_id}/chat-unified",
+                            json={"message": user_msg},
+                            timeout=30,
                         )
                         r.raise_for_status()
+                        updated = r.json()
+                        st.session_state[unified_chat_key] = updated.get("chat_history", [])
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Failed to approve: {e}")
-            with col_reject:
-                if st.button(f"Reject", key=f"reject_{supplier_id}", use_container_width=True):
-                    try:
-                        r = httpx.post(
-                            f"{API_BASE}/near-miss/{request_id}/{supplier_id}/decide",
-                            json={"decision": "rejected"},
-                            timeout=10,
-                        )
-                        r.raise_for_status()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to reject: {e}")
-
-        st.markdown("---")
+                        st.error(f"Failed to send: {e}")
 
 
 def _render_audit_trail(result):
     audit = result.get("audit_trail", {})
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("### Policies Checked")
-        for p in audit.get("policies_checked", []):
-            st.markdown(f"- `{p}`")
-
-        st.markdown("### Data Sources")
-        for ds in audit.get("data_sources_used", []):
-            st.markdown(f"- {ds}")
-
-    with col2:
-        st.markdown("### Suppliers Evaluated")
-        for sid in audit.get("supplier_ids_evaluated", []):
-            st.markdown(f"- `{sid}`")
-
-        if audit.get("historical_awards_consulted"):
-            st.markdown("### Historical Awards")
-            st.info(audit.get("historical_award_note", "Consulted"))
-
-    # Commit log
     commits = audit.get("commit_log", [])
-    if commits:
-        st.markdown("### Commit Log (Audit Trail)")
-        for c in commits:
-            status_icon = "✅" if c.get("approval_status") == "approved" else "❌"
-            st.markdown(f"""
+
+    st.markdown("### Commit Log")
+
+    if not commits:
+        st.info("No commits recorded yet.")
+        return
+
+    for c in commits:
+        status_icon = "✅" if c.get("approval_status") == "approved" else "❌"
+        st.markdown(f"""
 <div class="commit-entry">
 {status_icon} <strong>{c.get('commit_id', '')}</strong> | Stage: {c.get('stage', '')} | Iteration: {c.get('iteration', '')}
 
@@ -1156,16 +1062,6 @@ def _render_audit_trail(result):
 <strong>Approval:</strong> {c.get('approval_rationale', '')}
 </div>
 """, unsafe_allow_html=True)
-
-    # Raw PRS (collapsible)
-    prs = result.get("prs", {})
-    if prs:
-        with st.expander("Raw PRS (JSON)"):
-            st.json(prs)
-
-    # Full result JSON
-    with st.expander("Full Result (JSON)"):
-        st.json(result)
 
 
 _render_main_area(selected_id, requests_list, total)
