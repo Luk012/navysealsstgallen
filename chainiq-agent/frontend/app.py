@@ -62,8 +62,40 @@ st.markdown("""
         padding-left: 12px;
         margin: 8px 0;
     }
+    .chat-container {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px 0;
+    }
+    .chat-message {
+        padding: 12px 16px;
+        border-radius: 12px;
+        margin: 8px 0;
+        max-width: 85%;
+    }
+    .chat-user {
+        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        color: white;
+        margin-left: auto;
+        text-align: right;
+    }
+    .chat-assistant {
+        background: #1a1f2e;
+        border: 1px solid #333;
+        color: #e0e0e0;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+
+def submit_new_request(text):
+    """Submit a new purchase request via the API and return the created request."""
+    try:
+        r = httpx.post(f"{API_BASE}/requests", json={"request_text": text}, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def fetch_requests(page=1, page_size=20, category=None, country=None, scenario_tag=None, search=None):
@@ -404,7 +436,6 @@ def _render_main_area(selected_id, requests_list, total):
     if not selected_id:
         st.markdown("# ChainIQ Sourcing Agent")
         st.markdown("### Audit-Ready Autonomous Procurement Sourcing")
-        st.markdown("Select a request from the sidebar to begin analysis.")
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -418,6 +449,70 @@ def _render_main_area(selected_id, requests_list, total):
         with col4:
             multi_count = len([r for r in requests_list if "multilingual" in r.get("scenario_tags", [])])
             st.metric("Multilingual", multi_count)
+
+        st.markdown("---")
+
+        # ── Chat Interface for New Purchase Requests ──
+        st.markdown("## New Purchase Request")
+        st.markdown(
+            "Describe what you need to purchase in plain language. "
+            "Include details like category, quantity, budget, delivery country, and timeline."
+        )
+
+        # Initialize chat history in session state
+        if "chat_messages" not in st.session_state:
+            st.session_state["chat_messages"] = [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "Welcome to ChainIQ! I'm your procurement sourcing assistant.\n\n"
+                        "Tell me what you need to purchase and I'll find the best suppliers for you. "
+                        "For example:\n\n"
+                        '*"We need 200 consulting days of cybersecurity advisory for our offices in Germany and Switzerland. '
+                        'Budget is around 300,000 EUR. We need this delivered by end of Q2."*\n\n'
+                        "Type your purchase request below to get started."
+                    ),
+                }
+            ]
+
+        # Render chat history
+        for msg in st.session_state["chat_messages"]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        # Chat input
+        user_input = st.chat_input("Describe your purchase request...")
+
+        if user_input:
+            # Add user message to chat
+            st.session_state["chat_messages"].append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            # Submit to backend
+            with st.chat_message("assistant"):
+                with st.spinner("Creating your purchase request..."):
+                    result = submit_new_request(user_input)
+
+                if "error" in result:
+                    error_msg = f"Failed to create request: {result['error']}"
+                    st.error(error_msg)
+                    st.session_state["chat_messages"].append({"role": "assistant", "content": error_msg})
+                else:
+                    request_id = result["request_id"]
+                    success_msg = (
+                        f"Your purchase request has been created as **{request_id}**.\n\n"
+                        f"**Summary:** {result.get('title', '')}\n\n"
+                        "I'll now start the sourcing analysis — matching suppliers, checking policies, "
+                        "and ranking the best options for you."
+                    )
+                    st.markdown(success_msg)
+                    st.session_state["chat_messages"].append({"role": "assistant", "content": success_msg})
+
+                    # Auto-select and navigate to the new request
+                    st.session_state["selected_request"] = request_id
+                    st.rerun()
+
         return
 
     try:
