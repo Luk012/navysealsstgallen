@@ -155,6 +155,7 @@ def _progress_from_event(event):
         "stage4": 75,
         "branch_b": 85,
         "branch_a": 90,
+        "near_miss": 92,
         "pipeline": 95,
     }.get(event.get("stage"), 15)
 
@@ -502,8 +503,9 @@ def _render_main_area(selected_id, requests_list, total):
 
     _render_results(cached) if callable(globals().get("_render_results")) else None
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "Interpretation", "Policy", "Suppliers", "Recommendation", "Escalations", "Audit Trail"
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "Interpretation", "Policy", "Suppliers", "Recommendation",
+        "Escalations", "Near-Miss Options", "Audit Trail",
     ])
 
     with tab1:
@@ -519,9 +521,12 @@ def _render_main_area(selected_id, requests_list, total):
         _render_recommendation(cached)
 
     with tab5:
-        _render_escalations(cached)
+        _render_escalations(cached, selected_id)
 
     with tab6:
+        _render_near_miss(cached, selected_id)
+
+    with tab7:
         _render_audit_trail(cached)
 
 
@@ -601,12 +606,42 @@ def _render_policy(result):
             st.markdown(f"{'✅' if applies else '⬜'} **{rule.get('rule_id', '')}**: {rule.get('note', '')}")
 
 
+def _has_unresolved_blocking_escalations(result):
+    escalations = result.get("escalations", [])
+    resolutions = result.get("escalation_resolutions", {})
+    for esc in escalations:
+        if esc.get("blocking", False):
+            esc_id = esc.get("escalation_id", "")
+            resolution = resolutions.get(esc_id, {})
+            if not resolution.get("resolved", False):
+                return True
+    return False
+
+
 def _render_suppliers(result):
     shortlist = result.get("supplier_shortlist", [])
     excluded = result.get("suppliers_excluded", [])
+    provisional = _has_unresolved_blocking_escalations(result)
+    reevaluated = result.get("reevaluated", False)
+
+    if reevaluated:
+        st.success(
+            "**FINAL RESULTS** — These rankings have been re-evaluated after all escalations were resolved."
+        )
+    elif provisional:
+        st.warning(
+            "**PROVISIONAL RESULTS** — There are unresolved blocking escalations that may "
+            "change these rankings. Review the Escalations tab to resolve them before proceeding."
+        )
 
     if shortlist:
-        st.markdown("### Ranked Supplier Comparison")
+        if reevaluated:
+            heading = "Ranked Supplier Comparison (FINAL)"
+        elif provisional:
+            heading = "Ranked Supplier Comparison (PROVISIONAL)"
+        else:
+            heading = "Ranked Supplier Comparison"
+        st.markdown(f"### {heading}")
 
         # Radar chart for top suppliers
         if len(shortlist) >= 2:
@@ -683,14 +718,35 @@ def _render_recommendation(result):
     rec = result.get("recommendation", {})
     branch = result.get("branch", "A")
     relaxations = result.get("relaxations", [])
+    provisional = _has_unresolved_blocking_escalations(result)
+    reevaluated = result.get("reevaluated", False)
 
-    status = rec.get("status", "")
-    if status == "proceed":
-        st.success(f"**Status: Can Proceed**")
-    elif status == "cannot_proceed":
-        st.error(f"**Status: Cannot Proceed**")
-    elif status == "requires_relaxation":
-        st.warning(f"**Status: Requires Constraint Relaxation**")
+    if reevaluated:
+        st.success("**Status: FINAL — Re-evaluated after escalation resolution**")
+        st.caption(f"Re-evaluated at {result.get('reevaluated_at', 'unknown')}")
+    elif provisional:
+        st.warning("**Status: PROVISIONAL — Pending Escalation Resolution**")
+        st.info(
+            "This recommendation is provisional. Blocking escalations must be resolved "
+            "before this recommendation can be considered final. Go to the Escalations tab "
+            "to resolve them, then re-evaluate."
+        )
+        # List unresolved blocking escalations
+        unresolved = []
+        resolutions = result.get("escalation_resolutions", {})
+        for esc in result.get("escalations", []):
+            if esc.get("blocking") and not resolutions.get(esc.get("escalation_id", ""), {}).get("resolved"):
+                unresolved.append(f"- **{esc.get('escalation_id', '')}**: {esc.get('trigger', '')}")
+        if unresolved:
+            st.markdown("**Unresolved blocking escalations:**\n" + "\n".join(unresolved))
+    else:
+        status = rec.get("status", "")
+        if status == "proceed":
+            st.success("**Status: Can Proceed**")
+        elif status == "cannot_proceed":
+            st.error("**Status: Cannot Proceed**")
+        elif status == "requires_relaxation":
+            st.warning("**Status: Requires Constraint Relaxation**")
 
     st.markdown(f"**Branch:** {'A (viable options exist)' if branch == 'A' else 'B (constraint relaxation needed)'}")
 
@@ -713,28 +769,254 @@ def _render_recommendation(result):
             st.markdown(f"  *Suppliers unlocked:* {r.get('suppliers_unlocked', 0)}")
 
 
-def _render_escalations(result):
+def _render_escalations(result, request_id=None):
     escalations = result.get("escalations", [])
+    resolutions = result.get("escalation_resolutions", {})
 
     if not escalations:
         st.success("No escalations required")
         return
 
+    # --- Escalation overview cards ---
+    st.markdown("### Escalation Overview")
+    total = len(escalations)
+    resolved_count = sum(
+        1 for esc in escalations
+        if resolutions.get(esc.get("escalation_id", ""), {}).get("resolved", False)
+    )
+    blocking_count = sum(1 for esc in escalations if esc.get("blocking", False))
+    unresolved_blocking = sum(
+        1 for esc in escalations
+        if esc.get("blocking", False)
+        and not resolutions.get(esc.get("escalation_id", ""), {}).get("resolved", False)
+    )
+
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    with col_m1:
+        st.metric("Total", total)
+    with col_m2:
+        st.metric("Resolved", resolved_count)
+    with col_m3:
+        st.metric("Blocking", blocking_count)
+    with col_m4:
+        st.metric("Unresolved Blocking", unresolved_blocking)
+
+    # Compact escalation cards
     for esc in escalations:
+        esc_id = esc.get("escalation_id", "")
         blocking = esc.get("blocking", False)
-        icon = "🔴" if blocking else "🟡"
+        resolution = resolutions.get(esc_id, {})
+        is_resolved = resolution.get("resolved", False)
 
-        st.markdown(f"""
-{icon} **{esc.get('escalation_id', '')}** — Rule: {esc.get('rule', '')}
+        if is_resolved:
+            icon = "✅"
+        elif blocking:
+            icon = "🔴"
+        else:
+            icon = "🟡"
 
-**Trigger:** {esc.get('trigger', '')}
+        with st.expander(f"{icon} {esc_id} — {esc.get('rule', '')} | {'Resolved' if is_resolved else 'Unresolved'}", expanded=not is_resolved):
+            st.markdown(f"**Trigger:** {esc.get('trigger', '')}")
+            st.markdown(f"**Escalate To:** {esc.get('escalate_to', '')} | **Blocking:** {'Yes' if blocking else 'No'}")
+            if is_resolved:
+                st.success(f"Resolution: {resolution.get('resolution_summary', 'Resolved')}")
 
-**Escalate To:** {esc.get('escalate_to', '')}
+    all_resolved = resolved_count == total
 
-**Blocking:** {'Yes' if blocking else 'No'}
+    # --- Re-evaluation banner ---
+    if all_resolved and not result.get("reevaluated"):
+        st.markdown("---")
+        st.success("All escalations have been resolved!")
+        st.info(
+            "The current output (Interpretation, Policy, Suppliers, Recommendation) was generated "
+            "before these escalations were resolved and may be out of date. Click **Re-evaluate** "
+            "to refresh all tabs based on the escalation resolutions."
+        )
+        if request_id:
+            if st.button("Re-evaluate All Outputs", type="primary", use_container_width=True, key="reevaluate_btn"):
+                try:
+                    with st.spinner("Re-evaluating all outputs based on escalation resolutions..."):
+                        r = httpx.post(
+                            f"{API_BASE}/escalation/{request_id}/reevaluate",
+                            timeout=60,
+                        )
+                        r.raise_for_status()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Re-evaluation failed: {e}")
+        return
 
----
+    if result.get("reevaluated"):
+        st.markdown("---")
+        st.success(
+            f"Output was re-evaluated at {result.get('reevaluated_at', 'unknown')} "
+            "to reflect all escalation resolutions. All tabs now show final results."
+        )
+        return
+
+    # --- Unified chat interface ---
+    st.markdown("---")
+    st.markdown("### Escalation Resolution Chat")
+    st.caption(
+        "Use this chat to discuss and resolve all escalations. "
+        "The assistant will identify which escalation(s) your message addresses."
+    )
+
+    # Load unified chat history
+    unified_chat_key = f"unified_esc_chat_{request_id}"
+    if unified_chat_key not in st.session_state:
+        st.session_state[unified_chat_key] = result.get("_unified_chat_history", [])
+
+    # Display chat messages
+    chat_container = st.container()
+    with chat_container:
+        for msg in st.session_state[unified_chat_key]:
+            role = msg.get("role", "human")
+            with st.chat_message("user" if role == "human" else "assistant"):
+                st.write(msg.get("content", ""))
+
+    # Show initial guidance if chat is empty
+    if not st.session_state[unified_chat_key] and unresolved_blocking > 0:
+        unresolved_list = [
+            esc for esc in escalations
+            if not resolutions.get(esc.get("escalation_id", ""), {}).get("resolved", False)
+        ]
+        guidance_parts = ["**Unresolved escalations to address:**"]
+        for esc in unresolved_list:
+            esc_id = esc.get("escalation_id", "")
+            guidance_parts.append(
+                f"- **{esc_id}** ({esc.get('rule', '')}): {esc.get('trigger', '')}"
+            )
+        st.info("\n".join(guidance_parts))
+
+    # Input area
+    if request_id and not all_resolved:
+        col_input, col_send = st.columns([5, 1])
+        with col_input:
+            user_msg = st.text_input(
+                "Message",
+                key="unified_esc_input",
+                label_visibility="collapsed",
+                placeholder="Provide resolution, clarification, or approval for any escalation...",
+            )
+        with col_send:
+            send_btn = st.button("Send", key="unified_esc_send", use_container_width=True)
+
+        # Manual resolve buttons for individual escalations
+        st.markdown("**Quick resolve:**")
+        resolve_cols = st.columns(min(len(escalations), 4))
+        for idx, esc in enumerate(escalations):
+            esc_id = esc.get("escalation_id", "")
+            is_resolved = resolutions.get(esc_id, {}).get("resolved", False)
+            if not is_resolved:
+                col = resolve_cols[idx % len(resolve_cols)]
+                with col:
+                    if st.button(f"Resolve {esc_id}", key=f"resolve_{esc_id}", use_container_width=True):
+                        try:
+                            r = httpx.post(
+                                f"{API_BASE}/escalation/{request_id}/{esc_id}/resolve",
+                                timeout=10,
+                            )
+                            r.raise_for_status()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to resolve {esc_id}: {e}")
+
+        if send_btn and user_msg:
+            try:
+                r = httpx.post(
+                    f"{API_BASE}/escalation/{request_id}/chat-unified",
+                    json={"message": user_msg},
+                    timeout=30,
+                )
+                r.raise_for_status()
+                updated = r.json()
+                st.session_state[unified_chat_key] = updated.get("chat_history", [])
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to send message: {e}")
+
+
+def _render_near_miss(result, request_id=None):
+    near_miss = result.get("near_miss_suppliers", [])
+
+    if not near_miss:
+        st.info("No near-miss options identified. All viable suppliers are shown in the Suppliers tab.")
+        return
+
+    st.markdown("### Near-Miss Supplier Options")
+    st.warning(
+        "The suppliers below do **not** fully satisfy the specification. "
+        "They are presented for human review because the gaps are small enough to potentially accept."
+    )
+
+    for nm in near_miss:
+        supplier_id = nm.get("supplier_id", "")
+        supplier_name = nm.get("supplier_name", "")
+        decision = nm.get("human_decision")
+
+        # Decision badge
+        if decision == "approved":
+            badge = "✅ APPROVED"
+        elif decision == "rejected":
+            badge = "❌ REJECTED"
+        else:
+            badge = "⏳ PENDING REVIEW"
+
+        st.markdown(f"### {supplier_name} ({supplier_id}) — {badge}")
+
+        # Relaxed requirements breakdown
+        relaxed = nm.get("relaxed_requirements", [])
+        if relaxed:
+            st.markdown("**Requirements not met:**")
+            for req in relaxed:
+                risk = req.get("risk_assessment", "Unknown")
+                risk_color = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(
+                    risk.split(" ")[0] if risk else "", "⚪"
+                )
+                st.markdown(f"""
+{risk_color} **{req.get('requirement', '')}**
+- **Required:** {req.get('original_value', 'N/A')}
+- **Supplier offers:** {req.get('supplier_value', 'N/A')}
+- **Gap:** {req.get('gap_description', 'N/A')}
+- **Risk:** {req.get('risk_assessment', 'N/A')}
 """)
+
+        if nm.get("overall_near_miss_rationale"):
+            st.info(f"**Rationale:** {nm['overall_near_miss_rationale']}")
+
+        if nm.get("recommended_action"):
+            st.markdown(f"**Recommended action:** {nm['recommended_action']}")
+
+        # Approve/Reject buttons (only if no decision yet)
+        if decision is None and request_id:
+            col_approve, col_reject = st.columns(2)
+            with col_approve:
+                if st.button(f"Approve", key=f"approve_{supplier_id}", use_container_width=True, type="primary"):
+                    try:
+                        r = httpx.post(
+                            f"{API_BASE}/near-miss/{request_id}/{supplier_id}/decide",
+                            json={"decision": "approved"},
+                            timeout=10,
+                        )
+                        r.raise_for_status()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to approve: {e}")
+            with col_reject:
+                if st.button(f"Reject", key=f"reject_{supplier_id}", use_container_width=True):
+                    try:
+                        r = httpx.post(
+                            f"{API_BASE}/near-miss/{request_id}/{supplier_id}/decide",
+                            json={"decision": "rejected"},
+                            timeout=10,
+                        )
+                        r.raise_for_status()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to reject: {e}")
+
+        st.markdown("---")
 
 
 def _render_audit_trail(result):

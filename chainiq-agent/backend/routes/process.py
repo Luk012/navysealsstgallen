@@ -11,7 +11,9 @@ from backend.stages.stage3_mastermind import run_stage2_3_loop
 from backend.stages.stage4_matching import run_stage4
 from backend.stages.branch_a_ranking import run_branch_a
 from backend.stages.branch_b_relaxation import greedy_relax
+from backend.stages.near_miss_search import run_near_miss_search
 from backend.services.policy_engine import get_approval_threshold
+from backend.services.policy_verifier import verify_all_policies
 from backend.services.historical import get_historical_awards
 from backend.services.prs_utils import coerce_number
 
@@ -259,6 +261,22 @@ async def _run_pipeline(request: dict, emit=None) -> dict:
             payload=_summarize_supplier_results(supplier_results, passing),
         )
 
+    # Policy verification (3-phase: deterministic → gate → batched LLM)
+    if emit:
+        await emit(
+            event_type="stage_update",
+            stage="verification",
+            message="Starting policy verification",
+        )
+    verification_report = await verify_all_policies(prs, supplier_results)
+    if emit:
+        await emit(
+            event_type="verification_complete",
+            stage="verification",
+            message="Policy verification completed",
+            payload=verification_report.summary(),
+        )
+
     # Determine K (min quotes required)
     currency = prs.currency.value or "EUR"
     estimated_value = coerce_number(prs.estimated_total_value.value)
@@ -306,11 +324,25 @@ async def _run_pipeline(request: dict, emit=None) -> dict:
         if eligible:
             ranking_result = await run_branch_a(prs, eligible, emit=emit)
 
+    # Near-miss search (runs regardless of branch)
+    if emit:
+        await emit(
+            event_type="stage_update",
+            stage="near_miss",
+            message="Searching for near-miss supplier options outside spec",
+        )
+    near_miss_result = await run_near_miss_search(
+        prs, supplier_results,
+        [s.supplier_id for s in passing],
+        emit=emit,
+    )
+
     # Build output
     result = _build_output(
         request_id, prs, commit_log, analysis,
         supplier_results, passing, ranking_result,
-        branch, relaxations, threshold,
+        branch, relaxations, threshold, verification_report,
+        near_miss_result,
     )
     if emit:
         await emit(
@@ -329,7 +361,8 @@ async def _run_pipeline(request: dict, emit=None) -> dict:
 def _build_output(
     request_id, prs, commit_log, analysis,
     supplier_results, passing, ranking_result,
-    branch, relaxations, threshold,
+    branch, relaxations, threshold, verification_report=None,
+    near_miss_result=None,
 ) -> dict:
     """Assemble the final output matching example_output.json format."""
     # Request interpretation
@@ -376,6 +409,14 @@ def _build_output(
         "restricted_suppliers": {},
         "category_rules_applied": analysis.get("category_rules_triggered", []),
         "geography_rules_applied": analysis.get("geography_rules_triggered", []),
+        "verification_report": (
+            {
+                "summary": verification_report.summary(),
+                "results": [r.model_dump() for r in verification_report.results],
+            }
+            if verification_report
+            else {}
+        ),
     }
 
     # Supplier shortlist from ranking
@@ -484,10 +525,12 @@ def _build_output(
         "supplier_shortlist": supplier_shortlist,
         "suppliers_excluded": excluded,
         "escalations": escalations,
+        "escalation_resolutions": {},
         "recommendation": recommendation,
         "audit_trail": audit_trail,
         "branch": branch,
         "relaxations": relaxations,
+        "near_miss_suppliers": (near_miss_result or {}).get("near_miss_suppliers", []),
         "prs": json.loads(prs.model_dump_json()),
     }
 
