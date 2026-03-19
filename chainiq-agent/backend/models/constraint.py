@@ -2,7 +2,7 @@ from __future__ import annotations
 from enum import IntFlag
 from typing import Any
 from pydantic import BaseModel, Field
-from backend.config import WEIGHT_HARD, WEIGHT_EXPENSIVE, WEIGHT_MODERATE, WEIGHT_CHEAP
+from backend.config import WEIGHT_HARD, WEIGHT_EXPENSIVE, WEIGHT_PREFERRED, WEIGHT_MODERATE, WEIGHT_CHEAP
 
 
 class ConstraintFlag(IntFlag):
@@ -41,7 +41,7 @@ CONSTRAINT_WEIGHT_MAP = {
     ConstraintFlag.ESG_FAIL: WEIGHT_EXPENSIVE,
     ConstraintFlag.CURRENCY_MISMATCH: WEIGHT_EXPENSIVE,
     ConstraintFlag.LEAD_TIME_MISS: WEIGHT_MODERATE,
-    ConstraintFlag.NOT_PREFERRED: WEIGHT_MODERATE,
+    ConstraintFlag.NOT_PREFERRED: WEIGHT_PREFERRED,
     ConstraintFlag.GEO_GAP: WEIGHT_MODERATE,
     ConstraintFlag.CAPACITY_CONCERN: WEIGHT_CHEAP,
     ConstraintFlag.NO_HISTORICAL: WEIGHT_CHEAP,

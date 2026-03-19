@@ -26,6 +26,7 @@ CONFIDENCE_THRESHOLD = 0.5  # Below this, flag for escalation
 # Constraint weights
 WEIGHT_HARD = float("inf")
 WEIGHT_EXPENSIVE = 1000
+WEIGHT_PREFERRED = 500   # Preferred supplier status carries significant weight
 WEIGHT_MODERATE = 100
 WEIGHT_CHEAP = 10
 

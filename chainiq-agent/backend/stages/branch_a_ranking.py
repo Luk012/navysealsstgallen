@@ -17,12 +17,22 @@ async def run_branch_a(
     # Prepare scored supplier data for LLM
     scored = []
     for s in passing_suppliers[:10]:  # Top 10 max
+        # Enrich pricing with source metadata for audit traceability
+        pricing_with_source = dict(s.pricing) if s.pricing else {}
+        if pricing_with_source:
+            pricing_with_source["_data_source"] = "pricing.csv"
+            pricing_with_source["_source_note"] = (
+                f"Pricing ID {pricing_with_source.get('pricing_id', 'N/A')} "
+                f"from pricing.csv — tier: {pricing_with_source.get('tier_label', 'N/A')}, "
+                f"model: {pricing_with_source.get('pricing_model', 'N/A')}"
+            )
+
         entry = {
             "supplier_id": s.supplier_id,
             "supplier_name": s.supplier_name,
             "preferred": s.preferred,
             "incumbent": s.incumbent,
-            "pricing": s.pricing,
+            "pricing": pricing_with_source,
             "scores": s.scores,
             "covers_delivery_country": s.covers_delivery_country,
             "constraint_details": s.constraint_details,

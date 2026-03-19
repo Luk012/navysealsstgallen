@@ -270,21 +270,21 @@ async def escalation_reevaluate(request_id: str):
         user_msg,
     )
 
-    # Apply recommendation update
+    # ── Apply recommendation update ──
     if llm_response.get("recommendation"):
         result["recommendation"] = llm_response["recommendation"]
 
-    # Apply interpretation updates
+    # ── Apply interpretation updates ──
     for field, value in llm_response.get("interpretation_updates", {}).items():
         if field in result.get("request_interpretation", {}):
             result["request_interpretation"][field] = value
 
-    # Apply policy updates
+    # ── Apply policy updates ──
     for field, value in llm_response.get("policy_updates", {}).items():
         if field in result.get("policy_evaluation", {}):
             result["policy_evaluation"][field] = value
 
-    # Apply validation updates
+    # ── Apply validation updates & anomaly cleanup ──
     val_updates = llm_response.get("validation_updates", {})
     if val_updates.get("issues_to_remove"):
         remove_ids = set(val_updates["issues_to_remove"])
@@ -295,18 +295,79 @@ async def escalation_reevaluate(request_id: str):
     for new_issue in val_updates.get("issues_to_add", []):
         result.setdefault("validation", {}).setdefault("issues_detected", []).append(new_issue)
 
-    # Apply supplier ranking note updates
+    # Clean up stale anomalies that were resolved by escalation
+    anomalies_to_remove = val_updates.get("anomalies_to_remove", [])
+    if anomalies_to_remove:
+        remove_set = set(a.lower() for a in anomalies_to_remove)
+        issues = result.get("validation", {}).get("issues_detected", [])
+        result["validation"]["issues_detected"] = [
+            i for i in issues
+            if not any(
+                rem in (i.get("description", "").lower() + " " + i.get("type", "").lower())
+                for rem in remove_set
+            )
+        ]
+        # Also clean anomalies from PRS if present
+        prs = result.get("prs", {})
+        if prs.get("detected_anomalies") and prs["detected_anomalies"].get("value"):
+            prs_anomalies = prs["detected_anomalies"]["value"]
+            if isinstance(prs_anomalies, list):
+                prs["detected_anomalies"]["value"] = [
+                    a for a in prs_anomalies
+                    if not any(
+                        rem in (str(a).lower())
+                        for rem in remove_set
+                    )
+                ]
+
+    # ── Apply supplier ranking changes (full re-rank support) ──
     ranking_changes = llm_response.get("supplier_ranking_changes", {})
-    if ranking_changes.get("updated_notes"):
+
+    # If LLM provided updated_ranks, rebuild the shortlist with new ordering
+    if ranking_changes.get("updated_ranks"):
+        updated_ranks = ranking_changes["updated_ranks"]
+        existing_shortlist = {s.get("supplier_id"): s for s in result.get("supplier_shortlist", [])}
+        new_shortlist = []
+        for rank_entry in updated_ranks:
+            sid = rank_entry.get("supplier_id", "")
+            existing = existing_shortlist.get(sid, {})
+            # Merge: keep pricing/scores from original, update rank and notes
+            merged = {**existing}
+            merged["rank"] = rank_entry.get("new_rank", existing.get("rank", 0))
+            merged["supplier_id"] = sid
+            merged["supplier_name"] = rank_entry.get("supplier_name", existing.get("supplier_name", ""))
+            merged["recommendation_note"] = rank_entry.get("recommendation_note", existing.get("recommendation_note", ""))
+            if rank_entry.get("strengths"):
+                merged["strengths"] = rank_entry["strengths"]
+            if rank_entry.get("weaknesses"):
+                merged["weaknesses"] = rank_entry["weaknesses"]
+            new_shortlist.append(merged)
+        if new_shortlist:
+            result["supplier_shortlist"] = sorted(new_shortlist, key=lambda s: s.get("rank", 999))
+
+    # Also apply updated_notes if provided (for cases without full re-rank)
+    elif ranking_changes.get("updated_notes"):
         for supplier in result.get("supplier_shortlist", []):
             sid = supplier.get("supplier_id", "")
             if sid in ranking_changes["updated_notes"]:
                 supplier["recommendation_note"] = ranking_changes["updated_notes"][sid]
 
-    # Add re-evaluation to audit trail
+    # ── Update escalation statuses ──
+    esc_status_updates = llm_response.get("escalation_status_updates", {})
+    if esc_status_updates.get("updated_escalations"):
+        esc_lookup = {e.get("escalation_id"): e for e in result.get("escalations", [])}
+        for update in esc_status_updates["updated_escalations"]:
+            esc_id = update.get("escalation_id", "")
+            if esc_id in esc_lookup:
+                esc_lookup[esc_id]["blocking"] = update.get("blocking", False)
+                esc_lookup[esc_id]["resolution_note"] = update.get("resolution_note", "")
+                esc_lookup[esc_id]["resolved"] = True
+
+    # ── Add re-evaluation to audit trail ──
     audit = result.setdefault("audit_trail", {})
+    reeval_commit_id = f"REEVAL-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     audit.setdefault("commit_log", []).append({
-        "commit_id": f"REEVAL-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+        "commit_id": reeval_commit_id,
         "stage": "post_escalation_reevaluation",
         "iteration": 0,
         "field_path": "recommendation",
@@ -316,6 +377,20 @@ async def escalation_reevaluate(request_id: str):
         "approval_status": "approved",
         "approval_rationale": "All escalations resolved by authorized reviewers",
     })
+
+    # Record cleanup actions in audit trail
+    if anomalies_to_remove:
+        audit["commit_log"].append({
+            "commit_id": f"{reeval_commit_id}-CLEANUP",
+            "stage": "post_escalation_cleanup",
+            "iteration": 0,
+            "field_path": "validation.issues_detected",
+            "old_value": f"{len(anomalies_to_remove)} stale anomalies",
+            "new_value": "cleaned up",
+            "justification": f"Removed resolved anomalies: {', '.join(anomalies_to_remove)}",
+            "approval_status": "approved",
+            "approval_rationale": "Anomalies resolved via escalation process",
+        })
 
     # Mark as re-evaluated
     result["reevaluated"] = True

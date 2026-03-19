@@ -447,6 +447,9 @@ def _build_output(
                 "expedited_lead_time_days": p.get("expedited_lead_time_days", 0),
                 "expedited_unit_price": p.get("expedited_unit_price", 0),
                 "expedited_total": p.get("expedited_total", 0),
+                "pricing_model": p.get("pricing_model", ""),
+                "pricing_id": p.get("pricing_id", ""),
+                "pricing_data_source": "pricing.csv",
             })
         if match:
             entry.update({

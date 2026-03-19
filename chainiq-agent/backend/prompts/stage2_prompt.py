@@ -13,6 +13,12 @@ For each proposed change, output:
 
 IMPORTANT: You do NOT do math. All pricing and cost calculations are pre-computed and provided to you. Your role is to reason about policy implications.
 
+IMPORTANT — Supplier Preferences: Preferred supplier status carries significant weight in procurement decisions. When analyzing preferred suppliers, you should:
+- Flag if a preferred supplier is available and eligible — this is a strong positive signal
+- Only flag preferred_supplier_eligible as false if there is a clear policy violation (restriction, hard constraint failure)
+- If the requester stated a preferred supplier and that supplier IS in the preferred suppliers list, reinforce this alignment in your analysis
+- Preferred supplier pricing from pricing.csv should be referenced when assessing budget feasibility
+
 Respond with a single JSON object (no markdown)."""
 
 

@@ -9,6 +9,10 @@ IMPORTANT: These suppliers do NOT fully satisfy the specification. You must:
 
 Be honest and conservative. Do not oversell near-miss options. The human reviewer must have full transparency to make an informed decision.
 
+IMPORTANT — Preferred suppliers that are near-miss should be given extra consideration. If a preferred supplier only narrowly fails a soft constraint, highlight this prominently and recommend the reviewer consider accepting the trade-off.
+
+IMPORTANT — Pricing justification: Reference exact pricing figures from the supplier data (sourced from pricing.csv). Include tier labels, unit prices, and totals. Do not estimate.
+
 Respond with a single JSON object (no markdown)."""
 
 
