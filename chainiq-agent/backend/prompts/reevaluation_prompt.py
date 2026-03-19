@@ -8,12 +8,12 @@ You are given:
 
 Your job is to:
 1. Review each escalation resolution and understand what was decided
-2. **CLEANUP stale data**: Remove any detected anomalies, validation issues, or escalation flags that are no longer relevant after resolution. For example, if an escalation was about missing information and that information was provided, remove the corresponding anomaly and validation issue.
+2. **CLEANUP ALL stale data**: Remove ALL detected anomalies, validation issues, and escalation flags that are no longer relevant after resolution. For example, if an escalation was about missing information and that information was provided, remove the corresponding anomaly and validation issue. After reevaluation, the Interpretation tab MUST have ZERO validation issues — every issue that was flagged as requiring escalation should be removed once the escalation is resolved. Include ALL issue IDs from the current validation issues list in `issues_to_remove` if they correspond to resolved escalations.
 3. Re-assess the supplier ranking in light of the resolutions (e.g. a previously blocked supplier may now be viable, budget may have been adjusted, missing info may have been provided). Use the pricing data provided to justify any ranking changes with exact figures from suppliers.csv/pricing.csv.
 4. Update the recommendation to reflect a FINAL (non-provisional) status
 5. **Fully re-evaluate ALL output sections**: Update interpretation, policy evaluation, validation, supplier shortlist, and escalation status fields. Every output tab must reflect the post-resolution state accurately.
 6. Note in the audit trail that a post-escalation re-evaluation was performed
-7. Identify any anomalies that existed before escalation that are now resolved and should be cleaned up
+7. Identify ALL anomalies that existed before escalation that are now resolved and should be cleaned up. Be aggressive in cleaning up — if an escalation resolved the root cause, remove all related validation issues and anomalies.
 
 IMPORTANT — Supplier preferences: When re-ranking suppliers, give significant weight to preferred supplier status. A preferred supplier should be ranked higher unless there is a clear, policy-backed reason to rank them lower (e.g. restricted, fails hard constraints, or significantly worse on price/quality).
 
@@ -137,9 +137,10 @@ BRANCH: {result.get("branch", "A")}
 RELAXATIONS: {json.dumps(result.get("relaxations", []), indent=2)}
 
 INSTRUCTIONS:
-1. Review each escalation resolution and clean up any anomalies/issues that are now resolved.
+1. Review each escalation resolution and clean up ALL anomalies/issues that are now resolved.
 2. Re-rank suppliers if resolutions affect viability — reference exact pricing figures from the supplier shortlist data.
 3. Update ALL output tabs (interpretation, policy, validation, suppliers, escalations) to reflect the post-resolution state.
 4. Mark the recommendation as FINAL (not provisional).
 5. Give preferred suppliers significant weight in ranking unless policy prevents it.
-6. Justify pricing decisions by citing the exact tier labels and unit prices shown in the supplier data above."""
+6. Justify pricing decisions by citing the exact tier labels and unit prices shown in the supplier data above.
+7. CRITICAL: After reevaluation, the Interpretation tab MUST show ZERO validation issues. Include every issue_id from CURRENT VALIDATION ISSUES above in the issues_to_remove list if the corresponding escalation has been resolved. Also include broad anomaly descriptions in anomalies_to_remove to catch any stale anomaly text."""

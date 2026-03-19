@@ -449,47 +449,150 @@ def _build_output(
         ),
     }
 
-    # Supplier shortlist from ranking
-    supplier_shortlist = []
+    # Supplier shortlist from ranking — split into standard/expedited shipping variants
+    shipping_variants = []
     ranked = ranking_result.get("ranked_suppliers", [])
-    for i, rs in enumerate(ranked[:3]):
-        # Find the matching supplier result for detailed data
+    for rs in ranked[:6]:  # Consider up to 6 ranked to fill 3 spec-satisfying slots
         match = next(
             (s for s in supplier_results if s.supplier_id == rs.get("supplier_id")),
             None,
         )
-        entry = {
-            "rank": i + 1,
+        base = {
             "supplier_id": rs.get("supplier_id", ""),
             "supplier_name": rs.get("supplier_name", ""),
             "preferred": match.preferred if match else False,
             "incumbent": match.incumbent if match else False,
             "recommendation_note": rs.get("recommendation_note", ""),
+            "option_type": "spec_satisfying",
         }
         if match and match.pricing:
             p = match.pricing
-            entry.update({
+            base.update({
                 "pricing_tier_applied": p.get("tier_label", ""),
-                "unit_price": p.get("unit_price", 0),
-                "total_price": p.get("total_price", 0),
-                "currency": prs.currency.value or "EUR",
-                "standard_lead_time_days": p.get("standard_lead_time_days", 0),
-                "expedited_lead_time_days": p.get("expedited_lead_time_days", 0),
-                "expedited_unit_price": p.get("expedited_unit_price", 0),
-                "expedited_total": p.get("expedited_total", 0),
                 "pricing_model": p.get("pricing_model", ""),
                 "pricing_id": p.get("pricing_id", ""),
                 "pricing_data_source": "pricing.csv",
-            })
-        if match:
-            entry.update({
                 "quality_score": match.scores.get("quality_score", 0),
                 "risk_score": match.scores.get("risk_score", 0),
                 "esg_score": match.scores.get("esg_score", 0),
                 "policy_compliant": not match.hard_fail,
                 "covers_delivery_country": match.covers_delivery_country,
             })
-        supplier_shortlist.append(entry)
+            # Standard shipping variant
+            std = dict(base)
+            std["shipping_type"] = "standard"
+            std["unit_price"] = p.get("unit_price", 0)
+            std["total_price"] = p.get("total_price", 0)
+            std["lead_time_days"] = p.get("standard_lead_time_days", 0)
+            std["currency"] = prs.currency.value or "EUR"
+            std["standard_lead_time_days"] = p.get("standard_lead_time_days", 0)
+            std["expedited_lead_time_days"] = p.get("expedited_lead_time_days", 0)
+            std["expedited_unit_price"] = p.get("expedited_unit_price", 0)
+            std["expedited_total"] = p.get("expedited_total", 0)
+            shipping_variants.append(std)
+
+            # Expedited shipping variant (only if expedited data exists)
+            exp_price = p.get("expedited_unit_price", 0)
+            exp_lead = p.get("expedited_lead_time_days", 0)
+            if exp_price and exp_lead:
+                exp = dict(base)
+                exp["shipping_type"] = "expedited"
+                exp["unit_price"] = exp_price
+                exp["total_price"] = p.get("expedited_total", 0) or (exp_price * (coerce_number(prs.quantity.value, default=0) or 0))
+                exp["lead_time_days"] = exp_lead
+                exp["currency"] = prs.currency.value or "EUR"
+                exp["standard_lead_time_days"] = p.get("standard_lead_time_days", 0)
+                exp["expedited_lead_time_days"] = exp_lead
+                exp["expedited_unit_price"] = exp_price
+                exp["expedited_total"] = exp["total_price"]
+                shipping_variants.append(exp)
+        elif match:
+            base.update({
+                "quality_score": match.scores.get("quality_score", 0),
+                "risk_score": match.scores.get("risk_score", 0),
+                "esg_score": match.scores.get("esg_score", 0),
+                "policy_compliant": not match.hard_fail,
+                "covers_delivery_country": match.covers_delivery_country,
+                "shipping_type": "standard",
+                "lead_time_days": 0,
+                "currency": prs.currency.value or "EUR",
+            })
+            shipping_variants.append(base)
+
+    # Select top 3 spec-satisfying options (deduplicate: prefer variety of suppliers)
+    spec_satisfying = []
+    seen_combos = set()
+    for v in shipping_variants:
+        combo = (v["supplier_id"], v.get("shipping_type", "standard"))
+        if combo not in seen_combos and len(spec_satisfying) < 3:
+            seen_combos.add(combo)
+            v["rank"] = len(spec_satisfying) + 1
+            spec_satisfying.append(v)
+
+    # Build 2 constraint-relaxing options from near-miss suppliers
+    near_miss_list = (near_miss_result or {}).get("near_miss_suppliers", [])
+    constraint_relaxing = []
+    for nm in near_miss_list[:4]:  # Consider up to 4 near-miss to fill 2 slots
+        if len(constraint_relaxing) >= 2:
+            break
+        nm_sid = nm.get("supplier_id", "")
+        nm_match = next(
+            (s for s in supplier_results if s.supplier_id == nm_sid),
+            None,
+        )
+        relaxed_reqs = nm.get("relaxed_requirements", [])
+        constraints_relaxed_labels = [
+            r.get("requirement", "unknown") + ": " + r.get("gap_description", "")
+            for r in relaxed_reqs
+        ]
+        nm_entry = {
+            "rank": len(spec_satisfying) + len(constraint_relaxing) + 1,
+            "supplier_id": nm_sid,
+            "supplier_name": nm.get("supplier_name", ""),
+            "preferred": nm_match.preferred if nm_match else False,
+            "incumbent": nm_match.incumbent if nm_match else False,
+            "recommendation_note": nm.get("overall_near_miss_rationale", ""),
+            "option_type": "constraint_relaxing",
+            "constraints_relaxed": constraints_relaxed_labels,
+            "relaxed_requirements": relaxed_reqs,
+            "recommended_action": nm.get("recommended_action", ""),
+            "shipping_type": "standard",
+            "currency": prs.currency.value or "EUR",
+        }
+        if nm_match and nm_match.pricing:
+            p = nm_match.pricing
+            nm_entry.update({
+                "pricing_tier_applied": p.get("tier_label", ""),
+                "unit_price": p.get("unit_price", 0),
+                "total_price": p.get("total_price", 0),
+                "lead_time_days": p.get("standard_lead_time_days", 0),
+                "standard_lead_time_days": p.get("standard_lead_time_days", 0),
+                "expedited_lead_time_days": p.get("expedited_lead_time_days", 0),
+                "expedited_unit_price": p.get("expedited_unit_price", 0),
+                "expedited_total": p.get("expedited_total", 0),
+                "quality_score": nm_match.scores.get("quality_score", 0),
+                "risk_score": nm_match.scores.get("risk_score", 0),
+                "esg_score": nm_match.scores.get("esg_score", 0),
+                "policy_compliant": not nm_match.hard_fail,
+                "covers_delivery_country": nm_match.covers_delivery_country,
+                "pricing_model": p.get("pricing_model", ""),
+                "pricing_id": p.get("pricing_id", ""),
+                "pricing_data_source": "pricing.csv",
+            })
+        elif nm_match:
+            nm_entry.update({
+                "quality_score": nm_match.scores.get("quality_score", 0),
+                "risk_score": nm_match.scores.get("risk_score", 0),
+                "esg_score": nm_match.scores.get("esg_score", 0),
+                "policy_compliant": not nm_match.hard_fail,
+                "covers_delivery_country": nm_match.covers_delivery_country,
+                "lead_time_days": 0,
+            })
+        constraint_relaxing.append(nm_entry)
+
+    # Combine all options and compute comparative advantages
+    supplier_shortlist = spec_satisfying + constraint_relaxing
+    _compute_comparative_advantages(supplier_shortlist)
 
     # Excluded suppliers
     excluded = []
@@ -566,6 +669,88 @@ def _build_output(
         "near_miss_suppliers": (near_miss_result or {}).get("near_miss_suppliers", []),
         "prs": json.loads(prs.model_dump_json()),
     }
+
+
+def _compute_comparative_advantages(options: list[dict]):
+    """Compute comparative 'why consider' text for each option based on actual data."""
+    if not options:
+        return
+
+    # Collect metrics across all options for comparison
+    prices = [o.get("total_price", float("inf")) for o in options]
+    lead_times = [o.get("lead_time_days", float("inf")) for o in options]
+    quality_scores = [o.get("quality_score", 0) for o in options]
+    risk_scores = [o.get("risk_score", 100) for o in options]
+    esg_scores = [o.get("esg_score", 0) for o in options]
+
+    min_price = min(prices) if prices else 0
+    min_lead = min(lead_times) if lead_times else 0
+    max_quality = max(quality_scores) if quality_scores else 0
+    min_risk = min(risk_scores) if risk_scores else 0
+    max_esg = max(esg_scores) if esg_scores else 0
+
+    for i, opt in enumerate(options):
+        advantages = []
+        price = opt.get("total_price", float("inf"))
+        lead = opt.get("lead_time_days", float("inf"))
+        quality = opt.get("quality_score", 0)
+        risk = opt.get("risk_score", 100)
+        esg = opt.get("esg_score", 0)
+        currency = opt.get("currency", "EUR")
+        shipping = opt.get("shipping_type", "standard")
+
+        # Check each dimension
+        if price <= min_price and price > 0:
+            advantages.append(f"Lowest cost ({currency} {price:,.2f})")
+        elif price > 0 and min_price > 0:
+            pct_diff = ((price - min_price) / min_price) * 100
+            if pct_diff <= 5:
+                advantages.append(f"Near-lowest cost (+{pct_diff:.0f}% vs cheapest)")
+
+        if lead <= min_lead and lead > 0:
+            advantages.append(f"Fastest delivery ({lead}d {shipping})")
+        elif lead > 0 and min_lead > 0:
+            diff = lead - min_lead
+            if diff <= 5:
+                advantages.append(f"Near-fastest delivery (+{diff}d vs quickest)")
+
+        if quality >= max_quality and quality > 0:
+            advantages.append(f"Highest quality score ({quality}/100)")
+        elif quality > 0 and quality >= max_quality - 5:
+            advantages.append(f"Strong quality ({quality}/100)")
+
+        if risk <= min_risk:
+            advantages.append(f"Lowest risk ({risk}/100)")
+
+        if esg >= max_esg and esg > 0:
+            advantages.append(f"Best ESG rating ({esg}/100)")
+        elif esg > 0 and esg >= max_esg - 5:
+            advantages.append(f"Strong ESG ({esg}/100)")
+
+        if opt.get("preferred"):
+            advantages.append("Preferred supplier")
+
+        if opt.get("incumbent"):
+            advantages.append("Incumbent — proven track record")
+
+        if shipping == "expedited":
+            std_options = [o for o in options if o.get("supplier_id") == opt["supplier_id"] and o.get("shipping_type") == "standard"]
+            if std_options:
+                std_lead = std_options[0].get("lead_time_days", 0)
+                if std_lead and lead < std_lead:
+                    advantages.append(f"{std_lead - lead}d faster than standard shipping")
+
+        # Handle constraint-relaxing options
+        if opt.get("option_type") == "constraint_relaxing":
+            relaxed = opt.get("constraints_relaxed", [])
+            if relaxed:
+                advantages.append(f"Requires relaxing: {'; '.join(relaxed[:2])}")
+
+        # Construct the final why_consider line
+        if advantages:
+            opt["why_consider"] = ". ".join(advantages[:3])
+        else:
+            opt["why_consider"] = f"{shipping.capitalize()} shipping option"
 
 
 def _build_job_status(

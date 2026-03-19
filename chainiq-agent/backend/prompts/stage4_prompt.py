@@ -44,7 +44,7 @@ Respond with:
             "rank": 1,
             "supplier_id": "...",
             "supplier_name": "...",
-            "recommendation_note": "detailed explanation citing exact pricing (tier, unit price, total from pricing.csv), preferred status, quality/risk/ESG scores, lead time, and historical performance",
+            "recommendation_note": "detailed explanation citing exact pricing (tier, unit price, total from pricing.csv), preferred status, quality/risk/ESG scores, lead time, and historical performance. Focus on COMPARATIVE tradeoffs vs other options — what makes this option uniquely worth considering compared to the alternatives (e.g. 'Lowest total cost but 10 days slower than Option 2', 'Fastest delivery via expedited but 15% more expensive').",
             "strengths": ["..."],
             "weaknesses": ["..."]
         }}

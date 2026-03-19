@@ -392,6 +392,23 @@ async def escalation_reevaluate(request_id: str):
             "approval_rationale": "Anomalies resolved via escalation process",
         })
 
+    # Force-clean any remaining validation issues whose action_required references
+    # escalation, since all escalations are now resolved.
+    remaining_issues = result.get("validation", {}).get("issues_detected", [])
+    if remaining_issues:
+        cleaned = []
+        for issue in remaining_issues:
+            action = (issue.get("action_required") or "").lower()
+            desc = (issue.get("description") or "").lower()
+            # Keep only issues unrelated to escalation resolution
+            is_escalation_related = any(
+                kw in action or kw in desc
+                for kw in ["escalat", "review", "clarif", "confirm", "approv", "missing", "resolve"]
+            )
+            if not is_escalation_related:
+                cleaned.append(issue)
+        result["validation"]["issues_detected"] = cleaned
+
     # Mark as re-evaluated
     result["reevaluated"] = True
     result["reevaluated_at"] = datetime.now(timezone.utc).isoformat()

@@ -644,13 +644,13 @@ def _render_main_area(selected_id, requests_list, total):
     action_mode = None
     if isinstance(live_action, dict) and live_action.get("request_id") == selected_id:
         action_mode = live_action.get("mode")
-    is_live_action_running = action_mode in {"process", "watch", "replay"}
+    is_live_action_running = action_mode == "process"
 
     # Refresh the event log on every render so replay/progress stay in sync.
     stored_events = _load_live_events(selected_id, live_events_store)
     has_events = bool(stored_events)
 
-    col_btn, col_watch, col_status = st.columns([1, 1, 2])
+    col_btn, col_status = st.columns([1, 3])
     with col_btn:
         process_btn = st.button(
             "Processing..." if action_mode == "process" else "Process Request",
@@ -658,38 +658,20 @@ def _render_main_area(selected_id, requests_list, total):
             use_container_width=True,
             disabled=is_processing or has_result or is_live_action_running,
         )
-    with col_watch:
-        watch_label = "Replay Reasoning" if (has_result and has_events) else "Watch Live"
-        if action_mode == "watch":
-            watch_label = "Watching..."
-        elif action_mode == "replay":
-            watch_label = "Replaying..."
-        watch_btn = st.button(
-            watch_label,
-            use_container_width=True,
-            disabled=(not is_processing and not has_events) or is_live_action_running,
-        )
     with col_status:
         live_status = st.empty()
 
-    st.markdown("### Live Reasoning")
-    live_progress = st.empty()
-    live_log = st.empty()
+    with st.expander("Live Reasoning", expanded=is_live_action_running or is_processing):
+        live_progress = st.empty()
+        live_log = st.empty()
 
     if process_btn:
         st.session_state["live_action"] = {"request_id": selected_id, "mode": "process"}
         st.rerun()
 
-    if watch_btn:
-        st.session_state["live_action"] = {
-            "request_id": selected_id,
-            "mode": "watch" if is_processing else "replay",
-        }
-        st.rerun()
-
     cached = None
     try:
-        if action_mode in {"process", "watch"}:
+        if action_mode == "process":
             stream_state = _stream_processing(
                 selected_id,
                 live_status,
@@ -708,28 +690,11 @@ def _render_main_area(selected_id, requests_list, total):
                     fallback = get_result(selected_id)
                     if not _is_job_status_payload(fallback):
                         cached = fallback
-        elif action_mode == "replay" and has_events:
-            # Completed request: replay cached events with animated progress
-            live_status.info("Replaying reasoning from cached events...")
-            progress_state = {"max": 0}
-            for i, event in enumerate(stored_events):
-                if event.get("event_type") == "heartbeat":
-                    continue
-                new_progress = _progress_from_event(event)
-                if new_progress > progress_state["max"]:
-                    progress_state["max"] = new_progress
-                    live_progress.progress(progress_state["max"])
-                _render_live_reasoning(live_log, stored_events[: i + 1])
-                time.sleep(0.15)
-            live_progress.progress(100)
-            live_status.success("Replay complete.")
-            if has_result:
-                cached = result_state
         else:
             # No button clicked — show static state
             if _is_job_status_payload(result_state):
                 if is_processing:
-                    live_status.info("Processing in background. Click **Watch Live** to follow the reasoning.")
+                    live_status.info("Processing in background...")
                     live_progress.progress(
                         _max_progress_from_events(
                             stored_events,
@@ -759,8 +724,8 @@ def _render_main_area(selected_id, requests_list, total):
     if not cached:
         return
 
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "Interpretation", "Suppliers", "Escalations", "Audit Trail",
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "Interpretation", "Suppliers", "Escalations", "Audit Trail", "Audit Visualizer",
     ])
 
     with tab1:
@@ -774,6 +739,9 @@ def _render_main_area(selected_id, requests_list, total):
 
     with tab4:
         _render_audit_trail(cached)
+
+    with tab5:
+        _render_audit_visualizer(cached)
 
 
 def _render_interpretation(result):
@@ -875,7 +843,6 @@ def _has_unresolved_blocking_escalations(result):
 
 def _render_suppliers(result, request_id=None):
     shortlist = result.get("supplier_shortlist", [])
-    near_miss = result.get("near_miss_suppliers", [])
     rec = result.get("recommendation", {})
     branch = result.get("branch", "A")
     relaxations = result.get("relaxations", [])
@@ -919,8 +886,11 @@ def _render_suppliers(result, request_id=None):
             for r in relaxations:
                 st.markdown(f"⚖️ **{r.get('constraint', '')}** ({r.get('weight_class', '')}): {r.get('description', '')} — *{r.get('suppliers_unlocked', 0)} suppliers unlocked*")
 
-    if not shortlist and not near_miss:
-        # Distinguish "not processed" from "processed but no viable suppliers"
+    # Split shortlist into spec-satisfying and constraint-relaxing
+    spec_options = [s for s in shortlist if s.get("option_type") != "constraint_relaxing"]
+    relaxed_options = [s for s in shortlist if s.get("option_type") == "constraint_relaxing"]
+
+    if not shortlist:
         excluded = result.get("suppliers_excluded", [])
         if excluded or rec.get("status"):
             st.warning("No viable suppliers were found for this request after constraint evaluation.")
@@ -940,19 +910,22 @@ def _render_suppliers(result, request_id=None):
         categories_radar = ["Price", "Lead Time", "Quality", "Risk (inv)", "ESG"]
         fig = go.Figure()
 
-        for s in shortlist[:3]:
-            max_price = max(e.get("total_price", 1) for e in shortlist) or 1
+        for s in shortlist[:5]:
+            max_price = max(e.get("total_price", 1) for e in shortlist if e.get("total_price")) or 1
             price_score = 100 * (1 - s.get("total_price", 0) / max_price) if max_price else 50
-            lead_score = 100 * (1 - min(s.get("standard_lead_time_days", 30), 60) / 60)
+            lead = s.get("lead_time_days") or s.get("standard_lead_time_days", 30)
+            lead_score = 100 * (1 - min(lead, 60) / 60)
             quality = s.get("quality_score", 50)
             risk_inv = 100 - s.get("risk_score", 50)
             esg = s.get("esg_score", 50)
+            shipping_tag = f" ({s.get('shipping_type', 'std')})" if s.get("shipping_type") else ""
+            option_tag = " [relaxed]" if s.get("option_type") == "constraint_relaxing" else ""
 
             fig.add_trace(go.Scatterpolar(
                 r=[price_score, lead_score, quality, risk_inv, esg],
                 theta=categories_radar,
                 fill="toself",
-                name=f"#{s['rank']} {s['supplier_name']}",
+                name=f"#{s.get('rank', '?')} {s.get('supplier_name', '')}{shipping_tag}{option_tag}",
             ))
 
         fig.update_layout(
@@ -964,48 +937,21 @@ def _render_suppliers(result, request_id=None):
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── Top 3 supplier cards ──
-    st.markdown("### Top Ranked Suppliers")
-    for s in shortlist[:3]:
-        rank = s.get("rank", 0)
-        rank_icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"#{rank}")
-        labels = []
-        if s.get("preferred"):
-            labels.append("Preferred")
-        if s.get("incumbent"):
-            labels.append("Incumbent")
-        label_str = " ".join(f"`{l}`" for l in labels)
+    # ── Specification-Satisfying Options (up to 3) ──
+    st.markdown("### Specification-Satisfying Options")
+    st.caption("These options fully meet all requirements.")
+    for s in spec_options[:3]:
+        _render_supplier_card(s)
 
-        st.markdown(f"### {rank_icon} {s.get('supplier_name', '')} {label_str}")
-
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Price", _format_price(s.get("total_price", 0), s.get("currency", "")))
-        with col2:
-            st.metric("Unit Price", _format_price(s.get("unit_price", 0), s.get("currency", "")))
-        with col3:
-            st.metric("Lead Time", f"{s.get('standard_lead_time_days', 'N/A')}d std / {s.get('expedited_lead_time_days', 'N/A')}d exp")
-        with col4:
-            st.metric("Quality / Risk / ESG", f"{s.get('quality_score', 'N/A')} / {s.get('risk_score', 'N/A')} / {s.get('esg_score', 'N/A')}")
-
-        if s.get("recommendation_note"):
-            st.info(f"**Why this supplier:** {s['recommendation_note']}")
-
+    # ── Constraint-Relaxing Options (up to 2) ──
+    if relaxed_options:
         st.markdown("---")
-
-    # ── Additional ranked suppliers (collapsed) ──
-    if len(shortlist) > 3:
-        with st.expander(f"Other Ranked Suppliers ({len(shortlist) - 3} more)"):
-            for s in shortlist[3:]:
-                rank = s.get("rank", 0)
-                st.markdown(
-                    f"**#{rank} {s.get('supplier_name', '')}** — "
-                    f"{_format_price(s.get('total_price', 0), s.get('currency', ''))} | "
-                    f"Quality {s.get('quality_score', 'N/A')} | "
-                    f"Lead {s.get('standard_lead_time_days', 'N/A')}d"
-                )
-                if s.get("recommendation_note"):
-                    st.caption(s["recommendation_note"])
+        st.markdown("### Constraint-Relaxing Options")
+        st.caption(
+            "These options almost meet the spec. Specific constraints have been relaxed — review the trade-offs below."
+        )
+        for s in relaxed_options[:2]:
+            _render_supplier_card(s, show_relaxed=True, request_id=request_id)
 
     # ── Excluded suppliers ──
     excluded = result.get("suppliers_excluded", [])
@@ -1014,69 +960,90 @@ def _render_suppliers(result, request_id=None):
             for s in excluded:
                 st.markdown(f"❌ **{s.get('supplier_name', '')}** ({s.get('supplier_id', '')}): {s.get('reason', '')}")
 
-    # ── Near-miss suppliers ──
-    if near_miss:
-        st.markdown("---")
-        st.markdown("### Near-Miss Suppliers")
-        st.caption(
-            "These suppliers don't fully meet the spec but are close enough for human review."
-        )
 
-        for nm in near_miss:
-            supplier_id = nm.get("supplier_id", "")
-            supplier_name = nm.get("supplier_name", "")
-            decision = nm.get("human_decision")
+def _render_supplier_card(s, show_relaxed=False, request_id=None):
+    """Render a single supplier option card with shipping type and why_consider."""
+    rank = s.get("rank", 0)
+    rank_icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"#{rank}")
+    shipping = s.get("shipping_type", "standard")
+    shipping_badge = "🚀 Expedited" if shipping == "expedited" else "📦 Standard"
+    labels = [shipping_badge]
+    if s.get("preferred"):
+        labels.append("Preferred")
+    if s.get("incumbent"):
+        labels.append("Incumbent")
+    if s.get("option_type") == "constraint_relaxing":
+        labels.append("Constraint Relaxed")
+    label_str = " ".join(f"`{l}`" for l in labels)
 
-            if decision == "approved":
-                badge = "✅ APPROVED"
-            elif decision == "rejected":
-                badge = "❌ REJECTED"
-            else:
-                badge = "⏳ PENDING"
+    st.markdown(f"### {rank_icon} {s.get('supplier_name', '')} {label_str}")
 
-            with st.expander(f"{badge} {supplier_name} ({supplier_id})"):
-                relaxed = nm.get("relaxed_requirements", [])
-                if relaxed:
-                    for req in relaxed:
-                        risk = req.get("risk_assessment", "Unknown")
-                        risk_icon = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(
-                            risk.split(" ")[0] if risk else "", "⚪"
+    # Why consider this option — comparative tradeoff line
+    why = s.get("why_consider", "")
+    if why:
+        st.success(f"**Why consider:** {why}")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Price", _format_price(s.get("total_price", 0), s.get("currency", "")))
+    with col2:
+        st.metric("Unit Price", _format_price(s.get("unit_price", 0), s.get("currency", "")))
+    with col3:
+        lead = s.get("lead_time_days") or s.get("standard_lead_time_days", "N/A")
+        st.metric("Lead Time", f"{lead}d ({shipping})")
+    with col4:
+        st.metric("Quality / Risk / ESG", f"{s.get('quality_score', 'N/A')} / {s.get('risk_score', 'N/A')} / {s.get('esg_score', 'N/A')}")
+
+    # Show relaxed constraints for constraint-relaxing options
+    if show_relaxed:
+        constraints_relaxed = s.get("constraints_relaxed", [])
+        relaxed_reqs = s.get("relaxed_requirements", [])
+        if constraints_relaxed:
+            st.warning("**Constraints relaxed:** " + " | ".join(constraints_relaxed))
+        if relaxed_reqs:
+            for req in relaxed_reqs:
+                risk = req.get("risk_assessment", "Unknown")
+                risk_icon = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(
+                    risk.split(" ")[0] if risk else "", "⚪"
+                )
+                st.markdown(
+                    f"  {risk_icon} **{req.get('requirement', '')}**: "
+                    f"{req.get('original_value', 'N/A')} vs {req.get('supplier_value', 'N/A')} "
+                    f"— {req.get('gap_description', '')}"
+                )
+        if s.get("recommended_action"):
+            st.info(f"**Recommended action:** {s['recommended_action']}")
+
+        # Approve/Reject buttons for constraint-relaxing options
+        supplier_id = s.get("supplier_id", "")
+        if request_id and supplier_id:
+            col_a, col_r = st.columns(2)
+            with col_a:
+                if st.button("Approve", key=f"approve_{supplier_id}_{rank}", use_container_width=True, type="primary"):
+                    try:
+                        r = httpx.post(
+                            f"{API_BASE}/near-miss/{request_id}/{supplier_id}/decide",
+                            json={"decision": "approved"},
+                            timeout=10,
                         )
-                        st.markdown(
-                            f"{risk_icon} **{req.get('requirement', '')}**: "
-                            f"{req.get('original_value', 'N/A')} vs {req.get('supplier_value', 'N/A')} "
-                            f"— {req.get('gap_description', '')}"
+                        r.raise_for_status()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+            with col_r:
+                if st.button("Reject", key=f"reject_{supplier_id}_{rank}", use_container_width=True):
+                    try:
+                        r = httpx.post(
+                            f"{API_BASE}/near-miss/{request_id}/{supplier_id}/decide",
+                            json={"decision": "rejected"},
+                            timeout=10,
                         )
+                        r.raise_for_status()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
 
-                if nm.get("overall_near_miss_rationale"):
-                    st.info(nm["overall_near_miss_rationale"])
-
-                if decision is None and request_id:
-                    col_a, col_r = st.columns(2)
-                    with col_a:
-                        if st.button("Approve", key=f"approve_{supplier_id}", use_container_width=True, type="primary"):
-                            try:
-                                r = httpx.post(
-                                    f"{API_BASE}/near-miss/{request_id}/{supplier_id}/decide",
-                                    json={"decision": "approved"},
-                                    timeout=10,
-                                )
-                                r.raise_for_status()
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Failed: {e}")
-                    with col_r:
-                        if st.button("Reject", key=f"reject_{supplier_id}", use_container_width=True):
-                            try:
-                                r = httpx.post(
-                                    f"{API_BASE}/near-miss/{request_id}/{supplier_id}/decide",
-                                    json={"decision": "rejected"},
-                                    timeout=10,
-                                )
-                                r.raise_for_status()
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Failed: {e}")
+    st.markdown("---")
 
 
 def _render_escalations(result, request_id=None):
@@ -1233,6 +1200,295 @@ def _render_audit_trail(result):
 <strong>Approval:</strong> {c.get('approval_rationale', '')}
 </div>
 """, unsafe_allow_html=True)
+
+
+def _render_audit_visualizer(result):
+    """Render an auditor-friendly visual trace of the procurement decision."""
+    interp = result.get("request_interpretation", {})
+    policy = result.get("policy_evaluation", {})
+    shortlist = result.get("supplier_shortlist", [])
+    excluded = result.get("suppliers_excluded", [])
+    escalations = result.get("escalations", [])
+    rec = result.get("recommendation", {})
+    audit = result.get("audit_trail", {})
+    prs = result.get("prs", {})
+    branch = result.get("branch", "A")
+    reevaluated = result.get("reevaluated", False)
+    verification = policy.get("verification_report", {})
+    resolutions = result.get("escalation_resolutions", {})
+
+    # ── 1. Decision Summary ──
+    st.markdown("### Decision Summary")
+    status = rec.get("status", "unknown")
+    status_color = {"proceed": "🟢", "cannot_proceed": "🔴", "requires_relaxation": "🟡"}.get(status, "⚪")
+    finality = "FINAL" if reevaluated else "PROVISIONAL"
+    finality_icon = "✅" if reevaluated else "⏳"
+
+    st.markdown(
+        f"{status_color} **Outcome:** {status.replace('_', ' ').title()} | "
+        f"{finality_icon} **Status:** {finality} | "
+        f"**Branch:** {'A (viable suppliers found)' if branch == 'A' else 'B (constraint relaxation needed)'}"
+    )
+    if rec.get("reason"):
+        st.info(f"**Rationale:** {rec['reason']}")
+    if rec.get("preferred_supplier_if_resolved"):
+        st.markdown(f"**Recommended supplier:** {rec['preferred_supplier_if_resolved']}")
+
+    st.markdown("---")
+
+    # ── 2. Specification Traceability ──
+    st.markdown("### Specification Traceability")
+    st.caption("Each extracted field traced from the original request text, with confidence and source.")
+
+    spec_fields = [
+        ("Category", "category_l1", lambda v: f"{v}" + (f" > {interp.get('category_l2', '')}" if interp.get('category_l2') else "")),
+        ("Quantity", "quantity", lambda v: f"{v} {interp.get('unit_of_measure', '') or ''}".strip() if v else "N/A"),
+        ("Budget", "budget_amount", lambda v: f"{interp.get('currency', '')} {v:,.2f}" if isinstance(v, (int, float)) else str(v or "N/A")),
+        ("Currency", "currency", None),
+        ("Delivery Countries", "delivery_countries", lambda v: ", ".join(v) if isinstance(v, list) else str(v or "N/A")),
+        ("Required By", "required_by_date", None),
+        ("Data Residency", "data_residency_required", lambda v: "Yes" if v else "No"),
+        ("ESG Requirement", "esg_requirement", lambda v: "Yes" if v else "No"),
+        ("Preferred Supplier", "preferred_supplier_stated", lambda v: v if v else "None stated"),
+        ("Incumbent", "incumbent_supplier", lambda v: v if v else "None"),
+    ]
+
+    for label, field_key, formatter in spec_fields:
+        prs_field = prs.get(field_key, {})
+        raw_value = prs_field.get("value") if isinstance(prs_field, dict) else interp.get(field_key)
+        confidence = prs_field.get("confidence", 0) if isinstance(prs_field, dict) else 0
+        evidence = prs_field.get("evidence", "") if isinstance(prs_field, dict) else ""
+        source = prs_field.get("source", "default") if isinstance(prs_field, dict) else "default"
+
+        display_value = formatter(raw_value) if formatter and raw_value is not None else str(raw_value or "N/A")
+        conf_pct = confidence * 100 if isinstance(confidence, (int, float)) else 0
+        conf_icon = "🟢" if conf_pct >= 80 else ("🟡" if conf_pct >= 50 else "🔴")
+
+        with st.expander(f"{conf_icon} **{label}:** {display_value}  —  Confidence: {conf_pct:.0f}%  |  Source: {source}"):
+            if evidence:
+                st.markdown(f"**Evidence from request:** *\"{evidence}\"*")
+            else:
+                st.caption("No specific evidence text captured.")
+
+            triggered_rules = _find_rules_for_field(field_key, policy, verification)
+            if triggered_rules:
+                st.markdown("**Policy rules triggered:**")
+                for rule in triggered_rules:
+                    compliant = rule.get("compliant")
+                    r_icon = "✅" if compliant is True else ("❌" if compliant is False else "⚪")
+                    st.markdown(
+                        f"  {r_icon} `{rule.get('rule_id', '')}` ({rule.get('section', '')}) — "
+                        f"{rule.get('reasoning', 'No reasoning')}"
+                    )
+
+    st.markdown("---")
+
+    # ── 3. Policy Compliance Matrix ──
+    st.markdown("### Policy Compliance Matrix")
+    st.caption("Every policy rule checked, with pass/fail status, method, and reasoning.")
+
+    ver_results = verification.get("results", [])
+    ver_summary = verification.get("summary", {})
+
+    if ver_summary:
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            st.metric("Rules Checked", ver_summary.get("total_rules_checked", 0))
+        with c2:
+            st.metric("Compliant", ver_summary.get("compliant", 0))
+        with c3:
+            st.metric("Non-Compliant", ver_summary.get("non_compliant", 0))
+        with c4:
+            st.metric("Not Applicable", ver_summary.get("not_applicable", 0))
+        with c5:
+            st.metric("Flagged for Review", ver_summary.get("rules_flagged_for_review", 0))
+
+    sections = {}
+    for vr in ver_results:
+        sec = vr.get("section", "other")
+        sections.setdefault(sec, []).append(vr)
+
+    section_labels = {
+        "approval_thresholds": "Approval Thresholds",
+        "preferred_suppliers": "Preferred Suppliers",
+        "restricted_suppliers": "Restricted Suppliers",
+        "category_rules": "Category Rules",
+        "geography_rules": "Geography Rules",
+        "escalation_rules": "Escalation Rules",
+    }
+
+    for sec_key, sec_label in section_labels.items():
+        rules = sections.get(sec_key, [])
+        if not rules:
+            continue
+        compliant_count = sum(1 for r in rules if r.get("compliant") is True)
+        total_applicable = sum(1 for r in rules if r.get("applicable", True))
+        with st.expander(f"**{sec_label}** — {compliant_count}/{total_applicable} compliant"):
+            for r in rules:
+                if not r.get("applicable", True):
+                    st.caption(f"⚪ `{r.get('rule_id', '')}` — Not applicable")
+                    continue
+                compliant = r.get("compliant")
+                icon = "✅" if compliant is True else ("❌" if compliant is False else "⏳")
+                method = r.get("checked_by", r.get("classification", ""))
+                method_badge = {"python": "Deterministic", "llm": "LLM-Verified"}.get(method, method.title())
+                needs_review = "⚠️ Needs human review" if r.get("requires_human_review") else ""
+
+                st.markdown(f"{icon} `{r.get('rule_id', '')}` [{method_badge}] {needs_review}")
+                st.markdown(f"  {r.get('reasoning', 'No reasoning provided')}")
+                if r.get("evidence_found"):
+                    st.caption(f"  Evidence: {r['evidence_found']}")
+
+    st.markdown("---")
+
+    # ── 4. Supplier Evaluation Matrix ──
+    st.markdown("### Supplier Constraint Matrix")
+    st.caption("Pass/fail status for each constraint across all evaluated suppliers.")
+
+    for s in shortlist:
+        sname = s.get("supplier_name", "")
+        shipping = s.get("shipping_type", "standard")
+        option_type = s.get("option_type", "spec_satisfying")
+        type_badge = "Spec ✓" if option_type == "spec_satisfying" else "Relaxed ⚠️"
+
+        with st.expander(f"✅ **{sname}** ({shipping}) [{type_badge}] — Rank #{s.get('rank', '?')}"):
+            why = s.get("why_consider", "")
+            if why:
+                st.success(f"**Tradeoff:** {why}")
+
+            col_p, col_l, col_q = st.columns(3)
+            with col_p:
+                st.metric("Price", _format_price(s.get("total_price", 0), s.get("currency", "")))
+            with col_l:
+                lead = s.get("lead_time_days") or s.get("standard_lead_time_days", "N/A")
+                st.metric("Lead Time", f"{lead}d ({shipping})")
+            with col_q:
+                st.metric("Quality/Risk/ESG", f"{s.get('quality_score', 'N/A')}/{s.get('risk_score', 'N/A')}/{s.get('esg_score', 'N/A')}")
+
+            if s.get("constraints_relaxed"):
+                st.warning("**Constraints relaxed:** " + " | ".join(s["constraints_relaxed"]))
+
+            if s.get("recommendation_note"):
+                st.caption(f"Justification: {s['recommendation_note']}")
+
+    if excluded:
+        st.markdown("#### Excluded Suppliers")
+        for s in excluded:
+            with st.expander(f"❌ **{s.get('supplier_name', '')}** ({s.get('supplier_id', '')})"):
+                st.markdown(f"**Exclusion reason:** {s.get('reason', 'Hard constraint failure')}")
+
+    st.markdown("---")
+
+    # ── 5. Escalation Trace ──
+    st.markdown("### Escalation Trace")
+
+    if not escalations:
+        st.success("No escalations were triggered. All policies satisfied without human intervention.")
+    else:
+        for esc in escalations:
+            esc_id = esc.get("escalation_id", "")
+            resolution = resolutions.get(esc_id, {})
+            is_resolved = resolution.get("resolved", False)
+            icon = "✅" if is_resolved else "🔴"
+
+            with st.expander(f"{icon} {esc_id} — {esc.get('rule', '')}"):
+                st.markdown(f"**Trigger:** {esc.get('trigger', '')}")
+                st.markdown(f"**Escalated to:** {esc.get('escalate_to', '')}")
+                st.markdown(f"**Blocking:** {'Yes' if esc.get('blocking') else 'No'}")
+                if is_resolved:
+                    st.success(f"**Resolution:** {resolution.get('resolution_summary', 'Resolved')}")
+                    chat = resolution.get("chat_history", [])
+                    if chat:
+                        st.caption(f"Resolution reached after {len(chat)} message(s)")
+                else:
+                    st.error("**Unresolved** — blocking final recommendation")
+
+    st.markdown("---")
+
+    # ── 6. Decision Timeline ──
+    st.markdown("### Decision Timeline")
+    st.caption("Chronological record of every decision and change made during processing.")
+
+    commits = audit.get("commit_log", [])
+    if not commits:
+        st.info("No decision changes recorded.")
+    else:
+        for i, c in enumerate(commits):
+            stage = c.get("stage", "unknown")
+            status_icon = "✅" if c.get("approval_status") == "approved" else "❌"
+            step_num = i + 1
+
+            st.markdown(
+                f"**Step {step_num}** {status_icon} `{c.get('commit_id', '')}` "
+                f"| Stage: **{stage}** | Iteration: {c.get('iteration', '')}"
+            )
+            st.markdown(
+                f"  **Field:** `{c.get('field_path', '')}` — "
+                f"Changed from *{c.get('old_value', 'null')}* to **{c.get('new_value', 'null')}**"
+            )
+            st.markdown(f"  **Justification:** {c.get('justification', 'N/A')}")
+            if c.get("approval_rationale"):
+                st.caption(f"  Approval: {c['approval_rationale']}")
+            st.markdown("")
+
+    st.markdown("---")
+
+    # ── 7. Data Sources & Audit Metadata ──
+    st.markdown("### Data Sources & Metadata")
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        st.markdown("**Data sources used:**")
+        for ds in audit.get("data_sources_used", []):
+            st.markdown(f"  - `{ds}`")
+        st.markdown(f"**Policies checked:** {len(audit.get('policies_checked', []))}")
+        for pc in audit.get("policies_checked", []):
+            st.caption(f"  {pc}")
+    with col_d2:
+        st.markdown(f"**Suppliers evaluated:** {len(audit.get('supplier_ids_evaluated', []))}")
+        st.markdown(f"**Historical awards consulted:** {'Yes' if audit.get('historical_awards_consulted') else 'No'}")
+        if audit.get("historical_award_note"):
+            st.caption(audit["historical_award_note"])
+        st.markdown(f"**Branch selected:** {branch}")
+        if reevaluated:
+            st.markdown(f"**Re-evaluated at:** {result.get('reevaluated_at', 'N/A')}")
+
+
+def _find_rules_for_field(field_key, policy, verification):
+    """Find policy rules related to a specific PRS field."""
+    ver_results = verification.get("results", [])
+    if not ver_results:
+        return []
+
+    field_to_rules = {
+        "category_l1": ["CR-"],
+        "category_l2": ["CR-"],
+        "budget_amount": ["AT-", "ER-003"],
+        "currency": ["AT-", "ER-008"],
+        "quantity": ["CR-001", "CR-002", "CR-003", "CR-007", "ER-006"],
+        "delivery_countries": ["GR-"],
+        "required_by_date": ["GR-002"],
+        "data_residency_required": ["CR-004", "ER-005", "GR-001"],
+        "esg_requirement": [],
+        "preferred_supplier_stated": ["PREF-CHECK", "ER-002"],
+        "incumbent_supplier": ["PREF-CHECK"],
+    }
+
+    relevant_prefixes = field_to_rules.get(field_key, [])
+    if not relevant_prefixes:
+        return []
+
+    matched = []
+    seen = set()
+    for vr in ver_results:
+        rule_id = vr.get("rule_id", "")
+        if rule_id in seen:
+            continue
+        for prefix in relevant_prefixes:
+            if rule_id.startswith(prefix) or rule_id == prefix:
+                matched.append(vr)
+                seen.add(rule_id)
+                break
+    return matched
 
 
 _render_main_area(selected_id, requests_list, total)
