@@ -8,7 +8,8 @@ router = APIRouter()
 @router.get("/requests")
 async def list_requests(
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    # The Streamlit UI loads the full sample dataset for local filtering.
+    page_size: int = Query(20, ge=1, le=500),
     category: str = Query(None),
     country: str = Query(None),
     scenario_tag: str = Query(None),

@@ -10,6 +10,7 @@ DATA_DIR = PROJECT_ROOT.parent / "data"
 
 # Anthropic API
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
 
 # Model selection
 MODEL_EXTRACTION = "claude-sonnet-4-6"      # Stage 1: fast extraction

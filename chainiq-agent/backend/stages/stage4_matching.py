@@ -7,6 +7,7 @@ from backend.models.constraint import (
 )
 from backend.services.supplier_filter import get_candidate_suppliers, supplier_covers_countries
 from backend.services.pricing_engine import get_best_pricing_for_supplier
+from backend.services.prs_utils import coerce_bool, coerce_number
 from backend.services.policy_engine import (
     is_preferred_supplier, check_supplier_restriction,
 )
@@ -19,12 +20,12 @@ def run_stage4(prs: PRS) -> list[SupplierConstraintResult]:
     cat_l1 = prs.category_l1.value or ""
     cat_l2 = prs.category_l2.value or ""
     currency = prs.currency.value or "EUR"
-    quantity = prs.quantity.value or 0
-    budget = prs.budget_amount.value
+    quantity = coerce_number(prs.quantity.value, default=0) or 0
+    budget = coerce_number(prs.budget_amount.value)
     delivery_countries = prs.delivery_countries.value or []
     required_by_date = prs.required_by_date.value
-    data_residency = prs.data_residency_required.value or False
-    esg_required = prs.esg_requirement.value or False
+    data_residency = coerce_bool(prs.data_residency_required.value, default=False)
+    esg_required = coerce_bool(prs.esg_requirement.value, default=False)
     preferred_stated = prs.preferred_supplier_stated.value
     incumbent_stated = prs.incumbent_supplier.value
 

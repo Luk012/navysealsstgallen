@@ -7,7 +7,7 @@ from backend.config import MODEL_EXTRACTION
 from backend.prompts.stage1_prompt import STAGE1_SYSTEM, build_stage1_user_message
 
 
-async def run_stage1(request: dict) -> PRS:
+async def run_stage1(request: dict, emit=None) -> PRS:
     """Stage 1: Parse free-text request and extract structured PRS fields."""
     categories = data_store.categories_df.to_dict("records")
 
@@ -76,6 +76,25 @@ async def run_stage1(request: dict) -> PRS:
                 evidence="Stage 1 discrepancy detection",
                 source="extracted",
             )
+
+    if emit:
+        await emit(
+            event_type="extraction",
+            stage="stage1",
+            message="Stage 1 extracted structured request fields",
+            payload={
+                "category_l1": prs.category_l1.value,
+                "category_l2": prs.category_l2.value,
+                "quantity": prs.quantity.value,
+                "unit_of_measure": prs.unit_of_measure.value,
+                "budget_amount": prs.budget_amount.value,
+                "currency": prs.currency.value,
+                "delivery_countries": prs.delivery_countries.value,
+                "required_by_date": prs.required_by_date.value,
+                "preferred_supplier_stated": prs.preferred_supplier_stated.value,
+                "detected_anomalies": prs.detected_anomalies.value,
+            },
+        )
 
     return prs
 

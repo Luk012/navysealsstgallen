@@ -1,7 +1,8 @@
 from __future__ import annotations
+import asyncio
 import json
 from datetime import datetime, timezone
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from backend.data_loader import data_store
 from backend.models.prs import PRS
 from backend.models.output import ProcessingResult
@@ -12,83 +13,317 @@ from backend.stages.branch_a_ranking import run_branch_a
 from backend.stages.branch_b_relaxation import greedy_relax
 from backend.services.policy_engine import get_approval_threshold
 from backend.services.historical import get_historical_awards
+from backend.services.prs_utils import coerce_number
 
 router = APIRouter()
 
 # Cache results in memory
 _results_cache: dict[str, dict] = {}
+_job_status: dict[str, dict] = {}
+_processing_tasks: dict[str, asyncio.Task] = {}
+_job_events: dict[str, list[dict]] = {}
+_job_subscribers: dict[str, set[asyncio.Queue]] = {}
 
 
 @router.post("/process/{request_id}")
 async def process_request(request_id: str):
-    """Process a single request through the full pipeline."""
+    """Start processing a request in the background."""
     request = data_store.requests_by_id.get(request_id)
     if not request:
         raise HTTPException(status_code=404, detail=f"Request {request_id} not found")
 
+    return await _ensure_processing_started(request_id, request)
+
+
+@router.websocket("/ws/process/{request_id}")
+async def process_request_ws(websocket: WebSocket, request_id: str):
+    """Replay and stream live processing events for a request."""
+    await websocket.accept()
+
+    request = data_store.requests_by_id.get(request_id)
+    if not request:
+        await websocket.send_json(
+            _build_event(
+                request_id,
+                event_type="status",
+                stage="pipeline",
+                status="failed",
+                message=f"Request {request_id} not found",
+                payload={"error": f"Request {request_id} not found"},
+            )
+        )
+        await websocket.close(code=4404)
+        return
+
+    queue: asyncio.Queue = asyncio.Queue()
+    _job_subscribers.setdefault(request_id, set()).add(queue)
+
     try:
-        result = await _run_pipeline(request)
-        _results_cache[request_id] = result
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        for event in _job_events.get(request_id, []):
+            await websocket.send_json(event)
+
+        status = await _ensure_processing_started(request_id, request)
+        if status.get("status") == "completed":
+            if request_id in _results_cache and not any(
+                event.get("event_type") == "final_result"
+                for event in _job_events.get(request_id, [])
+            ):
+                await websocket.send_json(
+                    _build_event(
+                        request_id,
+                        event_type="final_result",
+                        stage="pipeline",
+                        message="Returning cached processing result",
+                        payload=_results_cache[request_id],
+                    )
+                )
+            await websocket.close()
+            return
+
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=5)
+            except asyncio.TimeoutError:
+                current_status = _job_status.get(
+                    request_id,
+                    {"request_id": request_id, "status": "not_started"},
+                )
+                await websocket.send_json(
+                    _build_event(
+                        request_id,
+                        event_type="heartbeat",
+                        stage="pipeline",
+                        status=current_status.get("status"),
+                        message="Processing is still running",
+                    )
+                )
+                if current_status.get("status") in {"completed", "failed"}:
+                    await websocket.close()
+                    return
+                continue
+
+            await websocket.send_json(event)
+            if event.get("event_type") == "status" and event.get("status") in {"completed", "failed"}:
+                await websocket.close()
+                return
+    except WebSocketDisconnect:
+        return
+    finally:
+        subscribers = _job_subscribers.get(request_id)
+        if subscribers:
+            subscribers.discard(queue)
+            if not subscribers:
+                _job_subscribers.pop(request_id, None)
 
 
 @router.get("/results/{request_id}")
 async def get_result(request_id: str):
-    """Get cached processing result."""
+    """Get cached result or current job status."""
     if request_id not in _results_cache:
-        raise HTTPException(status_code=404, detail="Result not found. Process the request first.")
+        return _job_status.get(
+            request_id,
+            {"request_id": request_id, "status": "not_started"},
+        )
     return _results_cache[request_id]
 
 
-async def _run_pipeline(request: dict) -> dict:
+async def _ensure_processing_started(request_id: str, request: dict) -> dict:
+    """Start a job once and return its current status payload."""
+    if request_id in _results_cache:
+        status = _job_status.get(request_id) or _build_job_status(
+            request_id=request_id,
+            status="completed",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+        _job_status[request_id] = status
+        return status
+
+    current_status = _job_status.get(request_id, {})
+    if current_status.get("status") in {"queued", "processing"}:
+        return current_status
+
+    _job_events[request_id] = []
+    status = _build_job_status(
+        request_id=request_id,
+        status="queued",
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _job_status[request_id] = status
+    await _emit_event(
+        request_id,
+        event_type="status",
+        stage="pipeline",
+        status="queued",
+        message="Request queued for processing",
+    )
+    _processing_tasks[request_id] = asyncio.create_task(
+        _process_request_in_background(request_id, request)
+    )
+    return status
+
+
+async def _process_request_in_background(request_id: str, request: dict):
+    """Run the pipeline and capture completion or failure for polling clients."""
+    status = _job_status.get(request_id, {})
+    status["status"] = "processing"
+    _job_status[request_id] = status
+    await _emit_event(
+        request_id,
+        event_type="status",
+        stage="pipeline",
+        status="processing",
+        message="Pipeline execution started",
+    )
+
+    async def emit(**event):
+        await _emit_event(request_id, **event)
+
+    try:
+        result = await _run_pipeline(request, emit=emit)
+        _results_cache[request_id] = result
+        _job_status[request_id] = {
+            **status,
+            "status": "completed",
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "error": None,
+        }
+        await _emit_event(
+            request_id,
+            event_type="final_result",
+            stage="pipeline",
+            message="Processing completed. Final result is ready.",
+            payload=result,
+        )
+        await _emit_event(
+            request_id,
+            event_type="status",
+            stage="pipeline",
+            status="completed",
+            message="Pipeline execution completed",
+        )
+    except Exception as e:
+        _job_status[request_id] = {
+            **status,
+            "status": "failed",
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "error": str(e),
+        }
+        await _emit_event(
+            request_id,
+            event_type="status",
+            stage="pipeline",
+            status="failed",
+            message="Pipeline execution failed",
+            payload={"error": str(e)},
+        )
+    finally:
+        _processing_tasks.pop(request_id, None)
+
+
+async def _run_pipeline(request: dict, emit=None) -> dict:
     """Execute the full 4-stage pipeline."""
     request_id = request["request_id"]
 
     # Stage 1: Intake & Extraction
-    prs = await run_stage1(request)
+    if emit:
+        await emit(
+            event_type="stage_update",
+            stage="stage1",
+            message="Starting Stage 1: Intake and extraction",
+        )
+    prs = await run_stage1(request, emit=emit)
 
     # Stages 2-3: Reasoning + Mastermind loop
-    prs, commit_log, analysis = await run_stage2_3_loop(prs)
+    if emit:
+        await emit(
+            event_type="stage_update",
+            stage="stage2",
+            message="Starting Stage 2/3 reasoning loop",
+        )
+    prs, commit_log, analysis = await run_stage2_3_loop(prs, emit=emit)
 
     # Stage 4: Supplier matching
+    if emit:
+        await emit(
+            event_type="stage_update",
+            stage="stage4",
+            message="Starting Stage 4: Supplier matching",
+        )
     supplier_results = run_stage4(prs)
+    passing = [s for s in supplier_results if not s.hard_fail]
+    if emit:
+        await emit(
+            event_type="supplier_summary",
+            stage="stage4",
+            message="Supplier constraint evaluation completed",
+            payload=_summarize_supplier_results(supplier_results, passing),
+        )
 
     # Determine K (min quotes required)
     currency = prs.currency.value or "EUR"
-    estimated_value = prs.estimated_total_value.value
-    if estimated_value is None and prs.budget_amount.value:
-        estimated_value = prs.budget_amount.value
+    estimated_value = coerce_number(prs.estimated_total_value.value)
     if estimated_value is None:
-        estimated_value = 0
-    threshold = get_approval_threshold(currency, float(estimated_value))
+        estimated_value = coerce_number(prs.budget_amount.value, default=0)
+    threshold = get_approval_threshold(currency, float(estimated_value or 0))
     k = threshold.get("min_supplier_quotes", 3) if threshold else 3
-
-    # Count passing suppliers (no hard fails)
-    passing = [s for s in supplier_results if not s.hard_fail]
 
     branch = "A" if len(passing) >= k else "B"
     relaxations = []
     ranking_result = {}
 
     if branch == "A":
-        ranking_result = await run_branch_a(prs, passing)
+        if emit:
+            await emit(
+                event_type="stage_update",
+                stage="branch_a",
+                message=f"Branch A selected with {len(passing)} viable suppliers",
+                payload={"required_quotes": k, "passing_suppliers": len(passing)},
+            )
+        ranking_result = await run_branch_a(prs, passing, emit=emit)
     else:
+        if emit:
+            await emit(
+                event_type="stage_update",
+                stage="branch_b",
+                message="Not enough viable suppliers. Applying constraint relaxation.",
+                payload={"required_quotes": k, "passing_suppliers": len(passing)},
+            )
         eligible, relaxations_applied = greedy_relax(
             [s for s in supplier_results],  # Copy list
             k=k,
         )
         relaxations = relaxations_applied
+        if emit:
+            await emit(
+                event_type="relaxations",
+                stage="branch_b",
+                message="Constraint relaxation completed",
+                payload={
+                    "relaxations": relaxations,
+                    "eligible_suppliers": [s.supplier_id for s in eligible],
+                },
+            )
         if eligible:
-            ranking_result = await run_branch_a(prs, eligible)
+            ranking_result = await run_branch_a(prs, eligible, emit=emit)
 
     # Build output
-    return _build_output(
+    result = _build_output(
         request_id, prs, commit_log, analysis,
         supplier_results, passing, ranking_result,
         branch, relaxations, threshold,
     )
+    if emit:
+        await emit(
+            event_type="summary",
+            stage="pipeline",
+            message="Final recommendation assembled",
+            payload={
+                "branch": branch,
+                "recommendation": result.get("recommendation", {}),
+                "escalations": result.get("escalations", []),
+            },
+        )
+    return result
 
 
 def _build_output(
@@ -254,4 +489,87 @@ def _build_output(
         "branch": branch,
         "relaxations": relaxations,
         "prs": json.loads(prs.model_dump_json()),
+    }
+
+
+def _build_job_status(
+    request_id: str,
+    status: str,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    error: str | None = None,
+) -> dict:
+    return {
+        "request_id": request_id,
+        "status": status,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "error": error,
+    }
+
+
+def _build_event(
+    request_id: str,
+    event_type: str,
+    stage: str,
+    message: str,
+    status: str | None = None,
+    iteration: int | None = None,
+    payload=None,
+) -> dict:
+    event = {
+        "request_id": request_id,
+        "event_type": event_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "stage": stage,
+        "message": message,
+    }
+    if status is not None:
+        event["status"] = status
+    if iteration is not None:
+        event["iteration"] = iteration
+    if payload is not None:
+        event["payload"] = payload
+    return event
+
+
+async def _emit_event(
+    request_id: str,
+    event_type: str,
+    stage: str,
+    message: str,
+    status: str | None = None,
+    iteration: int | None = None,
+    payload=None,
+) -> dict:
+    event = _build_event(
+        request_id=request_id,
+        event_type=event_type,
+        stage=stage,
+        message=message,
+        status=status,
+        iteration=iteration,
+        payload=payload,
+    )
+    _job_events.setdefault(request_id, []).append(event)
+    for subscriber in list(_job_subscribers.get(request_id, set())):
+        subscriber.put_nowait(event)
+    return event
+
+
+def _summarize_supplier_results(supplier_results, passing) -> dict:
+    return {
+        "total_candidates": len(supplier_results),
+        "passing_suppliers": len(passing),
+        "hard_fail_suppliers": len([s for s in supplier_results if s.hard_fail]),
+        "top_candidates": [
+            {
+                "supplier_id": s.supplier_id,
+                "supplier_name": s.supplier_name,
+                "hard_fail": s.hard_fail,
+                "total_penalty": s.total_penalty,
+                "total_price": s.pricing.get("total_price") if s.pricing else None,
+            }
+            for s in supplier_results[:5]
+        ],
     }

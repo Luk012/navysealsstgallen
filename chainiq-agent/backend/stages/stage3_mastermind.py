@@ -3,13 +3,14 @@ import json
 from backend.models.prs import PRS, PRSField
 from backend.models.commit_log import CommitLog
 from backend.services.llm import call_llm_json
+from backend.services.prs_utils import normalize_prs_field_value
 from backend.data_loader import data_store
 from backend.config import MODEL_MASTERMIND, MAX_ITERATIONS
 from backend.prompts.stage3_prompt import STAGE3_SYSTEM, build_stage3_user_message
 from backend.stages.stage2_reasoning import run_stage2
 
 
-async def run_stage2_3_loop(prs: PRS) -> tuple[PRS, CommitLog, dict]:
+async def run_stage2_3_loop(prs: PRS, emit=None) -> tuple[PRS, CommitLog, dict]:
     """Run the Stage 2 -> Stage 3 iteration loop until stable."""
     commit_log = CommitLog(request_id=prs.request_id)
     last_analysis = {}
@@ -22,8 +23,27 @@ async def run_stage2_3_loop(prs: PRS) -> tuple[PRS, CommitLog, dict]:
         last_analysis = stage2_result.get("analysis", {})
         proposed_changes = stage2_result.get("proposed_changes", [])
 
+        if emit:
+            await emit(
+                event_type="analysis",
+                stage="stage2",
+                iteration=iteration + 1,
+                message=f"Stage 2 reasoning completed for iteration {iteration + 1}",
+                payload={
+                    "analysis": last_analysis,
+                    "proposed_changes": proposed_changes,
+                },
+            )
+
         if not proposed_changes:
             commit_log.stable = True
+            if emit:
+                await emit(
+                    event_type="stage_update",
+                    stage="stage2",
+                    iteration=iteration + 1,
+                    message="No further PRS changes proposed. Stage 2/3 loop is stable.",
+                )
             break
 
         # Stage 3: Mastermind approval
@@ -37,6 +57,14 @@ async def run_stage2_3_loop(prs: PRS) -> tuple[PRS, CommitLog, dict]:
         )
 
         decisions = stage3_result.get("decisions", [])
+        if emit:
+            await emit(
+                event_type="decisions",
+                stage="stage3",
+                iteration=iteration + 1,
+                message=f"Stage 3 reviewed {len(decisions)} proposed changes",
+                payload={"decisions": decisions},
+            )
         applied_any = False
 
         for decision in decisions:
@@ -83,10 +111,24 @@ async def run_stage2_3_loop(prs: PRS) -> tuple[PRS, CommitLog, dict]:
 
         if not applied_any:
             commit_log.stable = True
+            if emit:
+                await emit(
+                    event_type="stage_update",
+                    stage="stage3",
+                    iteration=iteration + 1,
+                    message="No approved changes were applied. Stage 2/3 loop is stable.",
+                )
             break
 
         if stage3_result.get("stable", False):
             commit_log.stable = True
+            if emit:
+                await emit(
+                    event_type="stage_update",
+                    stage="stage3",
+                    iteration=iteration + 1,
+                    message="Mastermind marked the PRS as stable.",
+                )
             break
 
     return prs, commit_log, last_analysis
@@ -95,15 +137,16 @@ async def run_stage2_3_loop(prs: PRS) -> tuple[PRS, CommitLog, dict]:
 def _apply_change(prs: PRS, field_path: str, new_value):
     """Apply a change to the PRS field."""
     field_name = field_path.split(".")[0]
+    normalized_value = normalize_prs_field_value(field_name, new_value)
     if hasattr(prs, field_name):
         field = getattr(prs, field_name)
         if isinstance(field, PRSField):
-            field.value = new_value
+            field.value = normalized_value
             field.source = "derived"
-        elif field_name == "issues" and isinstance(new_value, list):
-            prs.issues = new_value
+        elif field_name == "issues" and isinstance(normalized_value, list):
+            prs.issues = normalized_value
         else:
-            setattr(prs, field_name, new_value)
+            setattr(prs, field_name, normalized_value)
 
 
 def _build_policies_summary() -> str:

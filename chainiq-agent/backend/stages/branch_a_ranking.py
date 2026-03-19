@@ -11,6 +11,7 @@ from backend.prompts.stage4_prompt import STAGE4_SYSTEM, build_stage4_user_messa
 async def run_branch_a(
     prs: PRS,
     passing_suppliers: list[SupplierConstraintResult],
+    emit=None,
 ) -> dict:
     """Branch A: Rank viable suppliers and produce recommendation."""
     # Prepare scored supplier data for LLM
@@ -36,4 +37,11 @@ async def run_branch_a(
     user_msg = build_stage4_user_message(prs_dict, scored, historical)
 
     result = await call_llm_json(MODEL_RANKING, STAGE4_SYSTEM, user_msg)
+    if emit:
+        await emit(
+            event_type="ranking",
+            stage="branch_a",
+            message=f"Ranked {len(result.get('ranked_suppliers', []))} viable suppliers",
+            payload=result,
+        )
     return result

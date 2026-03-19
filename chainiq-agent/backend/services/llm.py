@@ -1,16 +1,23 @@
 from __future__ import annotations
 import json
 import anthropic
-from backend.config import ANTHROPIC_API_KEY
+from backend.config import ANTHROPIC_API_KEY, LLM_TIMEOUT_SECONDS
 
 
 _client = None
 
 
-def get_client() -> anthropic.Anthropic:
+def get_client() -> anthropic.AsyncAnthropic:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        if not ANTHROPIC_API_KEY:
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. Export it before processing requests."
+            )
+        _client = anthropic.AsyncAnthropic(
+            api_key=ANTHROPIC_API_KEY,
+            timeout=LLM_TIMEOUT_SECONDS,
+        )
     return _client
 
 
@@ -23,7 +30,7 @@ async def call_llm(
 ) -> str:
     """Call Claude API and return the text response."""
     client = get_client()
-    response = client.messages.create(
+    response = await client.messages.create(
         model=model,
         max_tokens=max_tokens,
         temperature=temperature,

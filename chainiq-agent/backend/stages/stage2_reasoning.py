@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 from backend.models.prs import PRS
 from backend.services.llm import call_llm_json
+from backend.services.prs_utils import coerce_number
 from backend.services.policy_engine import (
     get_approval_threshold, is_preferred_supplier, check_supplier_restriction,
     get_category_rules, get_geography_rules,
@@ -18,8 +19,8 @@ async def run_stage2(prs: PRS) -> dict:
     cat_l1 = prs.category_l1.value or ""
     cat_l2 = prs.category_l2.value or ""
     currency = prs.currency.value or "EUR"
-    quantity = prs.quantity.value or 0
-    budget = prs.budget_amount.value
+    quantity = coerce_number(prs.quantity.value, default=0) or 0
+    budget = coerce_number(prs.budget_amount.value)
     delivery_countries = prs.delivery_countries.value or []
 
     # Pre-compute pricing context (LLM should NOT do math)
@@ -35,7 +36,7 @@ async def run_stage2(prs: PRS) -> dict:
         is_pref, _ = is_preferred_supplier(sid, cat_l1, cat_l2, delivery_countries)
         is_restricted, restriction_reason = check_supplier_restriction(
             sid, cat_l1, cat_l2, delivery_countries,
-            pricing_context.get("min_total_cost", 0), currency
+            coerce_number(pricing_context.get("min_total_cost"), default=0) or 0, currency
         )
         supplier_context.append({
             "supplier_id": sid,
