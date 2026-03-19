@@ -311,3 +311,4 @@ The following characteristics are present by design and should be handled by you
 ---
 
 *This dataset is a simplified representation of real enterprise procurement environments. The challenge focuses on governed AI decision-making, not building a full procurement platform.*
+# navysealsstgallen
