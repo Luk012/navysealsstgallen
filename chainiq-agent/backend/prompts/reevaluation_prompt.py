@@ -14,7 +14,8 @@ Your job is to:
 
 Be precise. Only change fields that are directly affected by the escalation resolutions. Do not invent new information beyond what the resolutions provide.
 
-Respond with a single JSON object (no markdown):
+IMPORTANT: Respond with ONLY a single valid JSON object. No markdown fences, no explanation, no text before or after the JSON.
+
 {
     "recommendation": {
         "status": "proceed|cannot_proceed|requires_relaxation",
@@ -33,7 +34,7 @@ Respond with a single JSON object (no markdown):
         "issues_to_add": []
     },
     "supplier_ranking_changes": {
-        "rerank": true/false,
+        "rerank": true,
         "rationale": "why ranking changed or stayed the same",
         "updated_notes": {
             "supplier_id": "updated recommendation note"

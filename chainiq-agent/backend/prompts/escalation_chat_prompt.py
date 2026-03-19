@@ -12,11 +12,12 @@ Your job is to:
 
 Be concise and practical. Focus on whether the blocking issue is genuinely addressed.
 
-Respond with a single JSON object (no markdown):
+IMPORTANT: Respond with ONLY a single valid JSON object. No markdown fences, no explanation, no text before or after the JSON.
+
 {
     "response": "your message to the human",
-    "resolved": true/false,
-    "resolution_summary": "brief summary of how the escalation was resolved (only if resolved=true, else empty string)"
+    "resolved": false,
+    "resolution_summary": "brief summary of how the escalation was resolved (only if resolved is true, else empty string)"
 }"""
 
 
@@ -36,14 +37,15 @@ Your job is to:
 
 Be concise and practical. Guide the reviewer through resolving all escalations efficiently.
 
-Respond with a single JSON object (no markdown):
+IMPORTANT: Respond with ONLY a single valid JSON object. No markdown fences, no explanation, no text before or after the JSON.
+
 {
     "response": "your unified message to the human",
     "escalation_updates": [
         {
             "escalation_id": "ESC-001",
-            "resolved": true/false,
-            "resolution_summary": "brief summary (only if resolved=true, else empty string)"
+            "resolved": false,
+            "resolution_summary": "brief summary (only if resolved is true, else empty string)"
         }
     ],
     "still_unresolved": ["ESC-002", "ESC-003"]

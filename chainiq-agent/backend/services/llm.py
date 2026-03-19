@@ -58,24 +58,59 @@ def _strip_code_fence(text: str) -> str:
 
 
 def extract_json_payload(text: str) -> Any:
-    """Parse JSON from model output, tolerating fences and leading prose."""
+    """Parse JSON from model output, tolerating fences, leading prose, and thinking blocks."""
     stripped = _strip_code_fence(text)
     if not stripped:
         raise ValueError("LLM returned an empty response")
 
+    # Strip <thinking>...</thinking> blocks that some models emit
+    import re
+    stripped = re.sub(r"<thinking>.*?</thinking>", "", stripped, flags=re.DOTALL).strip()
+    stripped = _strip_code_fence(stripped)
+
     decoder = json.JSONDecoder()
+
+    # Try direct parse first
     try:
         return decoder.decode(stripped)
     except json.JSONDecodeError:
-        for idx, char in enumerate(stripped):
-            if char not in "[{":
-                continue
-            try:
-                payload, _ = decoder.raw_decode(stripped[idx:])
-                logger.warning("Recovered JSON payload from non-canonical LLM response")
-                return payload
-            except json.JSONDecodeError:
-                continue
+        pass
+
+    # Try to find the outermost JSON object or array
+    # Search for the first { or [ and find the matching closing bracket
+    for idx, char in enumerate(stripped):
+        if char == "{":
+            # Find the last matching }
+            depth = 0
+            for end_idx in range(len(stripped) - 1, idx - 1, -1):
+                if stripped[end_idx] == "}":
+                    try:
+                        candidate = stripped[idx:end_idx + 1]
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        continue
+            break
+        elif char == "[":
+            depth = 0
+            for end_idx in range(len(stripped) - 1, idx - 1, -1):
+                if stripped[end_idx] == "]":
+                    try:
+                        candidate = stripped[idx:end_idx + 1]
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        continue
+            break
+
+    # Last resort: raw_decode scanning
+    for idx, char in enumerate(stripped):
+        if char not in "[{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(stripped[idx:])
+            logger.warning("Recovered JSON payload from non-canonical LLM response")
+            return payload
+        except json.JSONDecodeError:
+            continue
 
     preview = stripped[:300].replace("\n", " ")
     raise ValueError(f"LLM returned invalid JSON: {preview!r}")
@@ -106,7 +141,18 @@ async def call_llm_json(
     user_message: str,
     max_tokens: int = 8192,
     temperature: float = 0.0,
+    max_retries: int = 2,
 ) -> Any:
-    """Call Claude API and parse the JSON response."""
-    text = await call_llm(model, system, user_message, max_tokens, temperature)
-    return extract_json_payload(text)
+    """Call Claude API and parse the JSON response, retrying on parse failure."""
+    last_exc = None
+    for attempt in range(max_retries):
+        text = await call_llm(model, system, user_message, max_tokens, temperature)
+        try:
+            return extract_json_payload(text)
+        except (ValueError, json.JSONDecodeError) as exc:
+            last_exc = exc
+            logger.warning(
+                "JSON parse failed (attempt %d/%d): %s — response preview: %s",
+                attempt + 1, max_retries, exc, text[:200],
+            )
+    raise last_exc

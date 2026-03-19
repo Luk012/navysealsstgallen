@@ -44,10 +44,12 @@ async def _call_feedback_llm_json(operation: str, system: str, user_msg: str):
             raise ValueError(f"Expected JSON object, received {type(response).__name__}")
         return response
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         logger.exception("LLM %s failed", operation)
         raise HTTPException(
             status_code=502,
-            detail=f"LLM returned an invalid response during {operation}.",
+            detail=f"LLM {operation} failed: {type(exc).__name__}: {exc}",
         ) from exc
 
 
