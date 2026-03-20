@@ -273,22 +273,6 @@ async def _run_pipeline(request: dict, emit=None) -> dict:
             payload=_summarize_supplier_results(supplier_results, passing),
         )
 
-    # Policy verification (3-phase: deterministic → gate → batched LLM)
-    if emit:
-        await emit(
-            event_type="stage_update",
-            stage="verification",
-            message="Starting policy verification",
-        )
-    verification_report = await verify_all_policies(prs, supplier_results)
-    if emit:
-        await emit(
-            event_type="verification_complete",
-            stage="verification",
-            message="Policy verification completed",
-            payload=verification_report.summary(),
-        )
-
     # Determine K (min quotes required)
     currency = prs.currency.value or "EUR"
     estimated_value = coerce_number(prs.estimated_total_value.value)
@@ -299,8 +283,9 @@ async def _run_pipeline(request: dict, emit=None) -> dict:
 
     branch = "A" if len(passing) >= k else "B"
     relaxations = []
-    ranking_result = {}
 
+    # Prepare branch-specific ranking coroutine
+    ranking_suppliers = passing
     if branch == "A":
         if emit:
             await emit(
@@ -309,7 +294,6 @@ async def _run_pipeline(request: dict, emit=None) -> dict:
                 message=f"Branch A selected with {len(passing)} viable suppliers",
                 payload={"required_quotes": k, "passing_suppliers": len(passing)},
             )
-        ranking_result = await run_branch_a(prs, passing, emit=emit)
     else:
         if emit:
             await emit(
@@ -319,10 +303,11 @@ async def _run_pipeline(request: dict, emit=None) -> dict:
                 payload={"required_quotes": k, "passing_suppliers": len(passing)},
             )
         eligible, relaxations_applied = greedy_relax(
-            [s for s in supplier_results],  # Copy list
+            [s for s in supplier_results],
             k=k,
         )
         relaxations = relaxations_applied
+        ranking_suppliers = eligible
         if emit:
             await emit(
                 event_type="relaxations",
@@ -333,21 +318,46 @@ async def _run_pipeline(request: dict, emit=None) -> dict:
                     "eligible_suppliers": [s.supplier_id for s in eligible],
                 },
             )
-        if eligible:
-            ranking_result = await run_branch_a(prs, eligible, emit=emit)
 
-    # Near-miss search (runs regardless of branch)
+    # Run verification, ranking, and near-miss in parallel (they are independent)
     if emit:
         await emit(
             event_type="stage_update",
-            stage="near_miss",
-            message="Searching for near-miss supplier options outside spec",
+            stage="verification",
+            message="Starting policy verification, ranking, and near-miss search in parallel",
         )
-    near_miss_result = await run_near_miss_search(
-        prs, supplier_results,
-        [s.supplier_id for s in passing],
-        emit=emit,
+
+    async def _do_ranking():
+        if not ranking_suppliers:
+            return {}
+        return await run_branch_a(prs, ranking_suppliers, emit=emit)
+
+    async def _do_near_miss():
+        if emit:
+            await emit(
+                event_type="stage_update",
+                stage="near_miss",
+                message="Searching for near-miss supplier options outside spec",
+            )
+        return await run_near_miss_search(
+            prs, supplier_results,
+            [s.supplier_id for s in passing],
+            emit=emit,
+        )
+
+    verification_report, ranking_result, near_miss_result = await asyncio.gather(
+        verify_all_policies(prs, supplier_results),
+        _do_ranking(),
+        _do_near_miss(),
     )
+
+    if emit:
+        await emit(
+            event_type="verification_complete",
+            stage="verification",
+            message="Policy verification completed",
+            payload=verification_report.summary(),
+        )
 
     # Build output
     result = _build_output(

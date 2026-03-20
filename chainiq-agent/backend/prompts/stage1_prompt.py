@@ -6,10 +6,12 @@ For each field, provide:
 - evidence: the exact text span from the request that supports this value
 - source: always "extracted" for this stage
 
-If a field is not mentioned in the request, set value to null, confidence to 0.0, and evidence to "not specified".
-If the request is not in English, translate it to English and include the translation.
+Confidence must vary per field: 1.0 for explicit values, 0.6-0.8 for inferences, 0.3-0.5 for vague/ambiguous, 0.0 for unmentioned (value=null).
+NEVER fabricate a date from "soon"/"ASAP"/"quickly" — set required_by_date to null with confidence 0.0. Only use confidence >= 0.9 for dates explicitly stated.
 
-IMPORTANT: Unspecified fields are NOT missing information that blocks progress. They are unconstrained — the requester is open to any valid value.
+If a field is not mentioned, set value to null, confidence to 0.0, and evidence to "not specified".
+If not in English, translate to English.
+Unspecified fields are unconstrained, not missing.
 
 Respond with a single JSON object (no markdown, no explanation)."""
 

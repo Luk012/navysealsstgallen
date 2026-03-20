@@ -82,9 +82,10 @@ async def run_stage2_3_loop(prs: PRS, emit=None) -> tuple[PRS, CommitLog, dict]:
             if approved:
                 old_value = matching_change.get("current_value")
                 new_value = matching_change.get("proposed_value")
+                confidence_override = decision.get("confidence_override")
 
-                # Apply the change to the PRS
-                _apply_change(prs, field_path, new_value)
+                # Apply the change to the PRS (with confidence adjustment)
+                _apply_change(prs, field_path, new_value, confidence_override)
                 applied_any = True
 
                 commit_log.add_commit(
@@ -134,8 +135,8 @@ async def run_stage2_3_loop(prs: PRS, emit=None) -> tuple[PRS, CommitLog, dict]:
     return prs, commit_log, last_analysis
 
 
-def _apply_change(prs: PRS, field_path: str, new_value):
-    """Apply a change to the PRS field."""
+def _apply_change(prs: PRS, field_path: str, new_value, confidence_override: float | None = None):
+    """Apply a change to the PRS field, adjusting confidence for derived values."""
     field_name = field_path.split(".")[0]
     normalized_value = normalize_prs_field_value(field_name, new_value)
     if hasattr(prs, field_name):
@@ -143,10 +144,17 @@ def _apply_change(prs: PRS, field_path: str, new_value):
         if isinstance(field, PRSField):
             field.value = normalized_value
             field.source = "derived"
+            if confidence_override is not None:
+                field.confidence = confidence_override
+            else:
+                # Derived values should have lower confidence than explicitly extracted ones
+                field.confidence = min(field.confidence, 0.7)
         elif field_name == "issues" and isinstance(normalized_value, list):
             prs.issues = normalized_value
         else:
             setattr(prs, field_name, normalized_value)
+
+
 
 
 def _build_policies_summary() -> str:

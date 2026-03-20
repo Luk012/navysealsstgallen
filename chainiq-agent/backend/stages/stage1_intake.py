@@ -96,6 +96,22 @@ async def run_stage1(request: dict, emit=None) -> PRS:
                 "required_by_date": prs.required_by_date.value,
                 "preferred_supplier_stated": prs.preferred_supplier_stated.value,
                 "detected_anomalies": prs.detected_anomalies.value,
+                "original_request_text": prs.original_request_text,
+                "_confidence": {
+                    "category_l1": prs.category_l1.confidence,
+                    "category_l2": prs.category_l2.confidence,
+                    "quantity": prs.quantity.confidence,
+                    "unit_of_measure": prs.unit_of_measure.confidence,
+                    "budget_amount": prs.budget_amount.confidence,
+                    "currency": prs.currency.confidence,
+                    "delivery_countries": prs.delivery_countries.confidence,
+                    "required_by_date": prs.required_by_date.confidence,
+                    "preferred_supplier_stated": prs.preferred_supplier_stated.confidence,
+                    "data_residency_required": prs.data_residency_required.confidence,
+                    "esg_requirement": prs.esg_requirement.confidence,
+                    "incumbent_supplier": prs.incumbent_supplier.confidence,
+                    "requester_instruction": prs.requester_instruction.confidence,
+                },
             },
         )
 
